@@ -375,3 +375,34 @@ export const referenceCoverage = sqliteTable(
   },
   (table) => [uniqueIndex('idx_reference_coverage_project_asset').on(table.projectId, table.assetStableId)],
 );
+
+export const productionRecords = sqliteTable(
+  'production_records',
+  {
+    id: text('id').primaryKey(),
+    projectId: text('project_id').notNull().references(() => projects.id, { onDelete: 'cascade' }),
+    recordType: text('record_type').notNull(),
+    stableKey: text('stable_key').notNull(),
+    status: text('status').notNull(),
+    sequenceNumber: integer('sequence_number'),
+    contentJson: text('content_json').notNull(),
+    updatedAt: text('updated_at').notNull(),
+  },
+  (table) => [
+    uniqueIndex('idx_production_records_project_type_key').on(table.projectId, table.recordType, table.stableKey),
+    index('idx_production_records_project_type_status').on(table.projectId, table.recordType, table.status),
+    index('idx_production_records_project_sequence').on(table.projectId, table.sequenceNumber),
+  ],
+);
+
+export const projectRecoverySnapshots = sqliteTable(
+  'project_recovery_snapshots',
+  {
+    id: text('id').primaryKey(),
+    projectId: text('project_id').notNull().references(() => projects.id, { onDelete: 'cascade' }),
+    reason: text('reason').notNull(),
+    stateJson: text('state_json').notNull(),
+    createdAt: text('created_at').notNull(),
+  },
+  (table) => [index('idx_project_recovery_project_created').on(table.projectId, table.createdAt)],
+);

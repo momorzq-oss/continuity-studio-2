@@ -108,6 +108,7 @@ function ProjectStatus({ project }: { project: StudioProject }) {
   const [open, setOpen] = useState(false);
   const approvedAssets = project.assets.filter((asset) => ['Approved', 'Locked'].includes(asset.approvalState)).length;
   const approvedSequences = project.sequences.filter((sequence) => sequence.status === 'Approved').length;
+  const dependencyImpacts = project.production.dependencies.filter((item) => item.freshness !== 'Current').length;
   return (
     <div className="relative">
       <button
@@ -118,7 +119,7 @@ function ProjectStatus({ project }: { project: StudioProject }) {
       >
         <span className="size-1.5 shrink-0 rounded-full bg-[var(--ready)] shadow-[0_0_10px_var(--ready)]" />
         <span className="truncate font-medium">{project.title}</span>
-        <span className="hidden text-muted-foreground sm:inline">· {project.stage}</span>
+        <span className="hidden text-muted-foreground sm:inline">· {project.production.readiness}</span>
         <ChevronDown className={cn('size-3.5 shrink-0 text-muted-foreground transition', open && 'rotate-180')} />
       </button>
       {open && (
@@ -132,14 +133,19 @@ function ProjectStatus({ project }: { project: StudioProject }) {
           </div>
           <div className="mt-4 grid grid-cols-2 gap-x-5 gap-y-3 text-xs">
             <StatusLine label="Story" value={project.story.status} />
+            <StatusLine label="Story lock" value={project.production.storyLock.status} />
             <StatusLine label="World Bible" value={project.worldBible.status} />
             <StatusLine label="Film Bible" value={project.filmBible.status} />
             <StatusLine label="Assets" value={`${approvedAssets}/${project.assets.length}`} />
             <StatusLine label="Asset folder" value={project.flatAssetFolder.folderName} />
             <StatusLine label="Sequences" value={`${approvedSequences}/${project.sequenceCount}`} />
+            <StatusLine label="Dependencies" value={dependencyImpacts ? `${dependencyImpacts} affected` : 'Current'} />
+            <StatusLine label="Render queue" value={`${project.production.renderQueue.length} jobs`} />
+            <StatusLine label="Pipeline" value={project.production.currentPipelineStage} />
             <StatusLine label="Current" value={`Sequence ${project.currentSequence}`} />
             <StatusLine label="Export" value={project.exportStatus} />
           </div>
+          <div className="mt-4 rounded-xl bg-background/55 p-3 text-xs leading-5 text-muted-foreground"><span className="font-medium text-foreground">Next:</span> {project.production.nextLogicalAction}</div>
         </div>
       )}
     </div>
@@ -292,8 +298,9 @@ function AssetsCard({ project, ids, onAction, onOpenLibrary }: { project: Studio
   );
 }
 
-function SequenceCard({ sequence, onAction }: { sequence: StudioSequence; onAction: (message: string) => void }) {
+function SequenceCard({ project, sequence, onAction }: { project: StudioProject; sequence: StudioSequence; onAction: (message: string) => void }) {
   const copyPrompt = async () => navigator.clipboard.writeText(sequence.prompt);
+  const plan = project.production.sequencePlans[sequence.id];
   return (
     <section className="mt-4 overflow-hidden rounded-2xl border border-border bg-card/65">
       <div className="flex items-start justify-between gap-4 border-b border-border/70 p-4">
@@ -301,7 +308,7 @@ function SequenceCard({ sequence, onAction }: { sequence: StudioSequence; onActi
           <span className="grid size-9 shrink-0 place-items-center rounded-lg border border-amber-300/20 bg-amber-300/10 font-mono text-xs text-amber-200">{String(sequence.number).padStart(2, '0')}</span>
           <div className="min-w-0"><p className="truncate text-sm font-medium">{sequence.title}</p><p className="mt-1 text-xs text-muted-foreground">{sequence.duration}s · {sequence.location}</p></div>
         </div>
-        <Badge variant="outline" className={statusClass(sequence.status)}>{sequence.status}</Badge>
+        <div className="flex flex-wrap justify-end gap-1.5"><Badge variant="outline">V{String(plan.revision).padStart(2, '0')}</Badge><Badge variant="outline" className={statusClass(plan.freshness)}>{plan.freshness}</Badge><Badge variant="outline" className={statusClass(sequence.status)}>{sequence.status}</Badge></div>
       </div>
       <div className="space-y-4 p-4">
         <p className="text-sm leading-6 text-foreground/85">{sequence.purpose}</p>
@@ -315,6 +322,20 @@ function SequenceCard({ sequence, onAction }: { sequence: StudioSequence; onActi
           <StateBlock label="Scene graph" value={`${sequence.sceneGraph.nodes.length} nodes · ${sequence.sceneGraph.edges.length} relationships`} />
           <StateBlock label="Look-ahead" value={`${sequence.lookAhead.length} future requirement${sequence.lookAhead.length === 1 ? '' : 's'}`} />
         </div>
+        <div>
+          <div className="flex items-center justify-between gap-3"><p className="text-[10px] font-semibold uppercase tracking-[0.14em] text-muted-foreground">Internal timing</p><p className="text-[10px] tabular-nums text-muted-foreground">0–{sequence.duration}s · {plan.timing.length} beats</p></div>
+          <div className="mt-2 flex h-7 overflow-hidden rounded-lg border border-border bg-background/55">{plan.timing.map((beat, index) => <div key={beat.id} title={`${beat.startSecond}–${beat.endSecond}s · ${beat.label}`} className={cn('grid min-w-0 place-items-center border-r border-background/60 px-1 text-[8px] font-medium last:border-r-0', index % 2 ? 'bg-sky-400/10 text-sky-200' : 'bg-amber-300/10 text-amber-200')} style={{ width: `${((beat.endSecond - beat.startSecond) / sequence.duration) * 100}%` }}><span className="truncate">{beat.label}</span></div>)}</div>
+        </div>
+        <div className="grid gap-3 text-xs sm:grid-cols-3">
+          <StateBlock label="Shot intelligence" value={`${plan.shots.length} shots · lens, blocking, eyeline, depth, speed`} />
+          <StateBlock label="Dialogue & voice" value={`${plan.dialogue.length} line${plan.dialogue.length === 1 ? '' : 's'} · ${plan.dialoguePath}`} />
+          <StateBlock label="Conflict check" value={plan.conflicts.length ? `${plan.conflicts.length} open` : 'Passed'} />
+        </div>
+        <details className="rounded-xl border border-border bg-background/50 p-3">
+          <summary className="cursor-pointer text-xs font-medium">Reference package & priority rules</summary>
+          <p className="mt-3 text-[10px] leading-5 text-muted-foreground">{plan.referencePackage.uploadInstruction}</p>
+          <ul className="mt-2 space-y-1 text-[10px] leading-5 text-muted-foreground">{plan.referencePackage.priorityRules.map((rule) => <li key={rule}>{rule}</li>)}</ul>
+        </details>
         <details className="rounded-xl border border-border bg-background/50 p-3">
           <summary className="cursor-pointer text-xs font-medium">Seedance prompt</summary>
           <pre className="mt-3 max-h-48 overflow-auto whitespace-pre-wrap font-mono text-[10px] leading-5 text-muted-foreground">{sequence.prompt}</pre>
@@ -325,6 +346,9 @@ function SequenceCard({ sequence, onAction }: { sequence: StudioSequence; onActi
         {sequence.status !== 'Approved' && <Button size="sm" variant="outline" onClick={() => onAction(`Approve Sequence ${sequence.number}`)}><Check />Approve</Button>}
         <Button size="sm" variant="ghost" onClick={() => onAction(`Show Scene State for Sequence ${sequence.number}`)}>Scene state</Button>
         <Button size="sm" variant="ghost" onClick={() => onAction(`Show Scene Graph for Sequence ${sequence.number}`)}>Graph</Button>
+        <Button size="sm" variant="ghost" onClick={() => onAction(`Show timing and shot plan for Sequence ${sequence.number}`)}>Timing</Button>
+        <Button size="sm" variant="ghost" onClick={() => onAction(`Show reference package for Sequence ${sequence.number}`)}>References</Button>
+        <Button size="sm" variant="ghost" onClick={() => onAction(`Validate Sequence ${sequence.number}`)}>Validate</Button>
         <Button size="sm" variant="ghost" onClick={copyPrompt}><Copy />Copy prompt</Button>
       </div>
     </section>
@@ -387,6 +411,36 @@ function FlatAssetExportCard({ project, onAssetExport }: { project: StudioProjec
   );
 }
 
+function ProductionReadinessCard({ project, onAction }: { project: StudioProject; onAction: (message: string) => void }) {
+  const impacts = project.production.dependencies.filter((item) => item.freshness !== 'Current');
+  const ledger = project.production.costLedger;
+  return (
+    <section className="mt-4 rounded-2xl border border-border bg-card/65 p-4">
+      <div className="flex items-start justify-between gap-4"><div><p className="text-sm font-medium">Production control</p><p className="mt-1 text-xs text-muted-foreground">{project.production.currentPipelineStage} · autosaved {relativeTime(project.production.autosave.lastSavedAt)}</p></div><Badge variant="outline" className={statusClass(project.production.readiness)}>{project.production.readiness}</Badge></div>
+      <div className="mt-4 grid gap-3 text-xs sm:grid-cols-4">
+        <StateBlock label="Dependencies" value={impacts.length ? `${impacts.length} affected` : 'All current'} />
+        <StateBlock label="Render queue" value={`${project.production.renderQueue.length} jobs`} />
+        <StateBlock label="Attempts" value={`${ledger.generationCount} · ${ledger.estimatedCredits} credits`} />
+        <StateBlock label="Checkpoints" value={`${project.production.checkpoints.length} saved`} />
+      </div>
+      <div className="mt-3 rounded-xl bg-background/55 p-3 text-xs leading-5 text-foreground/80"><span className="font-medium">Next logical action:</span> {project.production.nextLogicalAction}</div>
+      {impacts.length > 0 && <div className="mt-3 flex flex-wrap gap-1.5">{impacts.slice(0, 6).map((impact) => <Badge key={impact.id} variant="outline" className={statusClass(impact.freshness)}>{impact.targetId} · {impact.freshness}</Badge>)}</div>}
+      <div className="mt-4 flex flex-wrap gap-2 border-t border-border/70 pt-3"><Button size="sm" onClick={() => onAction('Continue')}>Continue production</Button><Button size="sm" variant="outline" onClick={() => onAction('Show dependencies')}>Dependencies</Button><Button size="sm" variant="outline" onClick={() => onAction('Show render queue and costs')}>Queue & cost</Button><Button size="sm" variant="ghost" onClick={() => onAction('Run final quality check')}>Final check</Button></div>
+    </section>
+  );
+}
+
+function DialogueCard({ project, sequence }: { project: StudioProject; sequence: StudioSequence }) {
+  const plan = project.production.sequencePlans[sequence.id];
+  return <section className="mt-4 rounded-2xl border border-border bg-card/65 p-4"><div className="flex items-center justify-between gap-3"><div className="flex items-center gap-2"><Mic className="size-4 text-amber-300" /><p className="text-sm font-medium">Dialogue & voice ownership</p></div><Badge variant="outline">{plan.dialoguePath}</Badge></div><div className="mt-4 space-y-2">{plan.dialogue.length ? plan.dialogue.map((line) => <div key={line.id} className="rounded-xl bg-background/55 p-3"><div className="flex items-center justify-between gap-3 text-xs"><span className="font-medium">Asset {assetNumber(line.speakerAssetNumber)} · {project.assets.find((asset) => asset.id === line.speakerAssetId)?.name}</span><span className="tabular-nums text-muted-foreground">{line.startSecond}–{line.endSecond}s</span></div><p className="mt-2 text-sm">“{line.exactDialogue}”</p><p className="mt-2 text-[10px] leading-5 text-muted-foreground">{line.language} · {line.accent} · {line.emotion} · {line.physicalAction}</p></div>) : <p className="text-xs text-muted-foreground">No dialogue is authored. The sequence remains explicitly silent.</p>}</div></section>;
+}
+
+function ValidationCard({ project, sequence, onAction }: { project: StudioProject; sequence: StudioSequence; onAction: (message: string) => void }) {
+  const report = project.production.validations.findLast((item) => item.sequenceNumber === sequence.number);
+  if (!report) return <ProductionReadinessCard project={project} onAction={onAction} />;
+  return <section className="mt-4 rounded-2xl border border-border bg-card/65 p-4"><div className="flex items-center justify-between gap-3"><div className="flex items-center gap-2"><ShieldCheck className="size-4 text-amber-300" /><p className="text-sm font-medium">{sequence.id} validation</p></div><Badge variant="outline" className={statusClass(report.status)}>{report.status}</Badge></div><div className="mt-4 space-y-2">{report.checks.map((check) => <div key={check.id} className="rounded-xl bg-background/55 p-3"><div className="flex items-center justify-between gap-3 text-xs"><span className="font-medium">{check.name}</span><Badge variant="outline" className={statusClass(check.status)}>{check.status}</Badge></div><p className="mt-2 text-[10px] leading-5 text-muted-foreground">Expected: {check.expected}<br />Actual: {check.actual}</p></div>)}</div>{report.correctionInstruction && <div className="mt-3 rounded-xl border border-rose-400/15 bg-rose-400/5 p-3 text-[10px] leading-5 text-rose-100">Targeted correction: {report.correctionInstruction}</div>}</section>;
+}
+
 function MessageItem({ item, project, onAction, onOpenLibrary, onExport, onAssetExport }: { item: StudioMessage; project: StudioProject; onAction: (message: string) => void; onOpenLibrary: () => void; onExport: () => void; onAssetExport: () => void }) {
   if (item.role === 'user') {
     return <div className="ml-auto max-w-[82%] rounded-[18px_18px_5px_18px] bg-secondary px-4 py-3 text-sm leading-6 text-secondary-foreground shadow-sm">{item.content}</div>;
@@ -401,8 +455,11 @@ function MessageItem({ item, project, onAction, onOpenLibrary, onExport, onAsset
           {item.metadata?.kind === 'world' && <WorldCard project={project} onAction={onAction} />}
           {item.metadata?.kind === 'bible' && <BibleCard project={project} onAction={onAction} />}
           {item.metadata?.kind === 'assets' && <AssetsCard project={project} ids={item.metadata.assetIds} onAction={onAction} onOpenLibrary={onOpenLibrary} />}
-          {item.metadata?.kind === 'sequence' && sequence && <SequenceCard sequence={sequence} onAction={onAction} />}
+          {['sequence', 'timing', 'reference-package'].includes(item.metadata?.kind ?? '') && sequence && <SequenceCard project={project} sequence={sequence} onAction={onAction} />}
           {['scene', 'graph', 'lookahead'].includes(item.metadata?.kind ?? '') && sequence && <SceneIntelligenceCard sequence={sequence} />}
+          {item.metadata?.kind === 'dialogue' && sequence && <DialogueCard project={project} sequence={sequence} />}
+          {item.metadata?.kind === 'validation' && sequence && <ValidationCard project={project} sequence={sequence} onAction={onAction} />}
+          {['readiness', 'queue', 'assembly', 'status'].includes(item.metadata?.kind ?? '') && <ProductionReadinessCard project={project} onAction={onAction} />}
           {item.metadata?.kind === 'coverage' && <ReferenceCoverageCard assets={item.metadata.assetIds?.length ? project.assets.filter((asset) => item.metadata?.assetIds?.includes(asset.id)) : project.assets.filter((asset) => asset.importance !== 'Incidental')} />}
           {item.metadata?.kind === 'export' && <ExportCard project={project} onExport={onExport} />}
           {item.metadata?.kind === 'flat-assets' && <FlatAssetExportCard project={project} onAssetExport={onAssetExport} />}
@@ -755,7 +812,7 @@ function SettingsView({ project, lightMode, setLightMode, onUpdate }: { project:
   const settingSections = [
     { title: 'AI Brain', icon: Sparkles, description: 'Automatic Mode interprets instructions and chooses the normal next production step.', control: <Switch checked={project?.settings.automaticMode ?? true} onCheckedChange={(checked) => onUpdate({ automaticMode: checked })} disabled={!project} /> },
     { title: 'Image Generation', icon: ImageIcon, description: project?.settings.imageProvider === 'Not connected' ? 'No image provider connected. Prompts and references remain safe until you choose one.' : project?.settings.imageProvider ?? 'Not connected', control: <Badge variant="outline">Not connected</Badge> },
-    { title: 'Video Generation', icon: Film, description: 'Seedance-ready prompt adapter with provider-specific generation kept behind a clean interface.', control: <Badge variant="outline" className="border-sky-400/20 bg-sky-400/10 text-sky-200">Prompt ready</Badge> },
+    { title: 'Video Generation', icon: Film, description: 'Provider-neutral sequence packages adapt to a connected model only after its duration, resolution, reference, audio, prompt, image-to-video, and cost limits are known.', control: <Badge variant="outline" className="border-sky-400/20 bg-sky-400/10 text-sky-200">Package ready</Badge> },
     { title: 'Storage', icon: Upload, description: 'Structured project memory and original media are stored separately and isolated by project ID.', control: <Badge variant="outline">Private</Badge> },
     { title: 'Appearance', icon: lightMode ? Sun : Moon, description: 'Choose the interface contrast for this device.', control: <Switch checked={lightMode} onCheckedChange={setLightMode} /> },
     { title: 'Privacy', icon: Lock, description: 'Media is sent to a provider only when you request generation. API keys never enter exports.', control: <Switch checked={project?.settings.privacyMode ?? true} onCheckedChange={(checked) => onUpdate({ privacyMode: checked })} disabled={!project} /> },

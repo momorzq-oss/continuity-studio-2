@@ -275,6 +275,27 @@ const schemaStatements = [
     updated_at TEXT NOT NULL,
     UNIQUE(project_id, asset_stable_id)
   )`,
+  `CREATE TABLE IF NOT EXISTS production_records (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    record_type TEXT NOT NULL,
+    stable_key TEXT NOT NULL,
+    status TEXT NOT NULL,
+    sequence_number INTEGER,
+    content_json TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(project_id, record_type, stable_key)
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_production_records_project_type_status ON production_records(project_id, record_type, status)`,
+  `CREATE INDEX IF NOT EXISTS idx_production_records_project_sequence ON production_records(project_id, sequence_number)`,
+  `CREATE TABLE IF NOT EXISTS project_recovery_snapshots (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    reason TEXT NOT NULL,
+    state_json TEXT NOT NULL,
+    created_at TEXT NOT NULL
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_project_recovery_project_created ON project_recovery_snapshots(project_id, created_at)`,
   `PRAGMA optimize`,
 ] as const;
 

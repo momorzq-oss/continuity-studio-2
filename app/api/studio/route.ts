@@ -140,7 +140,61 @@ function intelligenceStatements(project: StudioProject) {
       ),
     );
   }
+  const productionRecord = (recordType: string, stableKey: string, status: string, sequenceNumber: number | null, content: unknown) =>
+    DB.prepare(`INSERT INTO production_records (id, project_id, record_type, stable_key, status, sequence_number, content_json, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(project_id, record_type, stable_key) DO UPDATE SET status = excluded.status,
+      sequence_number = excluded.sequence_number, content_json = excluded.content_json, updated_at = excluded.updated_at`)
+      .bind(`${project.id}:${recordType}:${stableKey}`, project.id, recordType, stableKey, status, sequenceNumber, JSON.stringify(content), project.updatedAt);
+  for (const dependency of project.production.dependencies) {
+    statements.push(productionRecord('dependency', dependency.id, dependency.freshness, null, dependency));
+  }
+  for (const plan of Object.values(project.production.sequencePlans)) {
+    statements.push(productionRecord('sequence-plan', plan.sequenceId, plan.readiness, plan.sequenceNumber, plan));
+  }
+  for (const voice of Object.values(project.production.voiceIdentities)) {
+    statements.push(productionRecord('voice-identity', voice.characterAssetId, voice.approvalStatus, null, voice));
+  }
+  for (const lineage of Object.values(project.production.assetLineage)) {
+    statements.push(productionRecord('asset-lineage', lineage.assetId, lineage.approvedVersion ? 'Approved' : 'Draft', null, lineage));
+  }
+  for (const job of project.production.renderQueue) {
+    const plan = project.production.sequencePlans[job.targetId];
+    statements.push(
+      productionRecord('render-job', job.id, job.status, job.sequenceNumber, job),
+      DB.prepare(`INSERT INTO generation_jobs (
+        id, project_id, target_id, provider, model, prompt_version, reference_files_json, status,
+        failure_message, retry_history_json, started_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET provider = excluded.provider, model = excluded.model,
+        prompt_version = excluded.prompt_version, reference_files_json = excluded.reference_files_json,
+        status = excluded.status, failure_message = excluded.failure_message,
+        retry_history_json = excluded.retry_history_json, updated_at = excluded.updated_at`)
+        .bind(job.id, project.id, job.targetId, job.provider, job.model, plan?.revision ?? 1,
+          JSON.stringify(plan?.referencePackage ?? {}), job.status, job.failureMessage,
+          JSON.stringify(job.retryHistory), job.createdAt, job.updatedAt),
+    );
+  }
+  for (const report of project.production.validations) statements.push(productionRecord('validation', report.id, report.status, report.sequenceNumber, report));
+  for (const correction of project.production.corrections) statements.push(productionRecord('correction', correction.id, correction.status, correction.sequenceNumber, correction));
+  for (const checkpoint of project.production.checkpoints) statements.push(productionRecord('continuity-checkpoint', checkpoint.id, 'Approved', checkpoint.sequenceNumber, checkpoint));
+  for (const capability of project.production.modelCapabilities) statements.push(productionRecord('model-capability', capability.id, capability.connectionStatus, null, capability));
+  statements.push(
+    productionRecord('cost-ledger', 'current', 'Tracked', null, project.production.costLedger),
+    productionRecord('final-assembly', project.production.finalAssembly.id, project.production.finalAssembly.status, null, project.production.finalAssembly),
+    productionRecord('final-quality', project.production.finalQuality.id, project.production.finalQuality.status, null, project.production.finalQuality),
+    productionRecord('autosave', 'current', 'Enabled', null, project.production.autosave),
+  );
   return statements;
+}
+
+async function saveRecoverySnapshot(project: StudioProject, reason: string) {
+  const { DB } = getRuntimeEnv();
+  await DB.prepare('INSERT INTO project_recovery_snapshots (id, project_id, reason, state_json, created_at) VALUES (?, ?, ?, ?, ?)')
+    .bind(crypto.randomUUID(), project.id, reason, JSON.stringify(project), nowIso())
+    .run();
+  project.production.autosave.recoverySnapshotCount += 1;
+  project.production.autosave.lastRecoveryReason = reason;
 }
 
 async function createProjectGraph(project: StudioProject, messages: StudioMessage[]) {
@@ -282,7 +336,7 @@ function initialAssistantMessage(project: StudioProject): StudioMessage {
     id: `message_${crypto.randomUUID()}`,
     role: 'assistant',
     createdAt: nowIso(),
-    content: `I created “${project.title}” as one connected ${project.durationSeconds / 60}-minute production world with ${project.sequenceCount} sequences, ${project.assets.length} permanently numbered assets, ${project.locations.length} structured locations, ${project.environments.length} environment state${project.environments.length === 1 ? '' : 's'}, and ${project.knowledgeGraph.edges.length} production relationships. Every visual asset uses one project-wide number and will export directly inside ${project.flatAssetFolder.folderName} with no subfolders. Review the story first; nothing has been generated or approved yet.`,
+    content: `I created “${project.title}” as one connected ${project.durationSeconds / 60}-minute production world with ${project.sequenceCount} timed sequences, ${project.assets.length} permanently numbered assets, ${project.locations.length} structured locations, ${project.environments.length} environment state${project.environments.length === 1 ? '' : 's'}, and ${project.production.dependencies.length} tracked production dependencies. Every visual asset uses one project-wide number and will export directly inside ${project.flatAssetFolder.folderName} with no subfolders. Dependency freshness, revisions, reference priority, render recovery, validation, checkpoints, and final assembly are active. Review the story first; nothing has been generated or approved yet.`,
     metadata: { kind: 'story' },
   };
 }
@@ -327,6 +381,7 @@ export async function POST(request: Request) {
     if (!project) return json({ error: 'That project is no longer available.' }, { status: 404 });
 
     if (body.action === 'pin' || body.action === 'archive' || body.action === 'settings') {
+      await saveRecoverySnapshot(project, `Before ${body.action} action`);
       if (body.action === 'pin') project.pinned = !project.pinned;
       if (body.action === 'archive') project.archived = true;
       if (body.action === 'settings' && body.settings) project.settings = { ...project.settings, ...body.settings };
@@ -337,6 +392,7 @@ export async function POST(request: Request) {
 
     const content = body.message?.trim();
     if (!content) return json({ error: 'Write an instruction for the studio.' }, { status: 400 });
+    await saveRecoverySnapshot(project, `Before chat instruction: ${content.slice(0, 160)}`);
     const userMessage: StudioMessage = { id: `message_${crypto.randomUUID()}`, role: 'user', content, createdAt: nowIso() };
     const result = interpretStudioMessage(project, content);
     const normalized = normalizeProject(result.project);
