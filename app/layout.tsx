@@ -13,9 +13,30 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
+  metadataBase: new URL('https://continuity-studio-2.momorabeeh.chatgpt.site'),
   title: 'Continuity Studio 2',
   description:
     'A chat-first AI filmmaking workspace that remembers the whole production.',
+  openGraph: {
+    title: 'Continuity Studio 2',
+    description: 'Your movie. One continuous conversation.',
+    type: 'website',
+    url: 'https://continuity-studio-2.momorabeeh.chatgpt.site',
+    images: [
+      {
+        url: '/og.png',
+        width: 1200,
+        height: 630,
+        alt: 'Continuity Studio 2 — Your movie. One continuous conversation.',
+      },
+    ],
+  },
+  twitter: {
+    card: 'summary_large_image',
+    title: 'Continuity Studio 2',
+    description: 'Your movie. One continuous conversation.',
+    images: ['/og.png'],
+  },
 };
 
 export default function RootLayout({
