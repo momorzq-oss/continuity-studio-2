@@ -45,15 +45,16 @@ import { Switch } from '@/components/ui/switch';
 import { cn } from '@/lib/utils';
 import type { ProjectSummary, StudioAsset, StudioMessage, StudioProject, StudioSequence } from '@/lib/studio';
 
-type View = 'chat' | 'projects' | 'assets' | 'exports' | 'settings';
+type View = 'chat' | 'projects' | 'assets' | 'exports' | 'advanced' | 'settings';
 
 const primaryNavigation = [
   { id: 'projects' as const, label: 'Projects', icon: FolderClock },
   { id: 'assets' as const, label: 'Asset Library', icon: Library },
   { id: 'exports' as const, label: 'Exports', icon: Archive },
+  { id: 'advanced' as const, label: 'Advanced Control', icon: Network },
 ];
 
-const assetFilters = ['All', 'Characters', 'Creatures', 'Animals', 'Locations', 'Interiors', 'Environment States', 'Vehicles', 'Props', 'Weapons', 'Costumes', 'Furniture', 'Mechanical Systems', 'Approved', 'Pending', 'Needs Review'];
+const assetFilters = ['All', 'Characters', 'Creatures', 'Animals', 'Locations', 'Interiors', 'Environment States', 'Vehicles', 'Props', 'Weapons', 'Costumes', 'Furniture', 'Mechanical Systems', 'Approved', 'Pending', 'Needs Review', 'Retired', 'Orphaned'];
 
 function relativeTime(value: string) {
   const delta = Date.now() - new Date(value).getTime();
@@ -141,6 +142,7 @@ function ProjectStatus({ project }: { project: StudioProject }) {
             <StatusLine label="Dependencies" value={dependencyImpacts ? `${dependencyImpacts} affected` : 'Current'} />
             <StatusLine label="Render queue" value={`${project.production.renderQueue.length} jobs`} />
             <StatusLine label="Pipeline" value={project.production.currentPipelineStage} />
+            <StatusLine label="Project state" value={project.production.control.stateMachine.current} />
             <StatusLine label="Current" value={`Sequence ${project.currentSequence}`} />
             <StatusLine label="Export" value={project.exportStatus} />
           </div>
@@ -264,12 +266,12 @@ function AssetMiniCard({ asset, onAction }: { asset: StudioAsset; onAction: (mes
           <div className="min-w-0"><p className="truncate text-xs font-medium">Asset {assetNumber(asset.projectNumber)} · {asset.name}</p><p className="mt-0.5 truncate font-mono text-[9px] text-muted-foreground">{asset.generatedFileName}</p><p className="mt-0.5 font-mono text-[9px] text-muted-foreground/70">V{String(asset.version).padStart(2, '0')} · {asset.id}</p></div>
           {asset.lockState === 'Locked' && <Lock className="size-3.5 shrink-0 text-emerald-300" />}
         </div>
-        <div className="mt-2 flex flex-wrap gap-1.5"><Badge variant="outline" className={cn('h-4 px-1.5 text-[9px]', statusClass(asset.approvalState))}>{asset.approvalState}</Badge><Badge variant="outline" className="h-4 px-1.5 text-[9px]">{asset.importance}</Badge></div>
+        <div className="mt-2 flex flex-wrap gap-1.5"><Badge variant="outline" className={cn('h-4 px-1.5 text-[9px]', statusClass(asset.lifecycleStatus === 'Retired' ? 'Needs Review' : asset.approvalState))}>{asset.lifecycleStatus === 'Retired' ? 'Retired' : asset.approvalState}</Badge><Badge variant="outline" className="h-4 px-1.5 text-[9px]">{asset.importance}</Badge></div>
         <div className="mt-2 flex items-center justify-between text-[9px] text-muted-foreground"><span>Reference coverage</span><span className="tabular-nums">{coverage}%</span></div>
         <Progress value={coverage} className="mt-1 h-1" />
         <div className="mt-3 flex gap-1.5">
-          {asset.lockState !== 'Locked' && <Button size="xs" onClick={() => onAction(`Approve ${asset.id}`)}>Approve</Button>}
-          <Button size="xs" variant="ghost" onClick={() => onAction(`Regenerate ${asset.id}`)}><RefreshCw />Version</Button>
+          {asset.lifecycleStatus !== 'Retired' && asset.lockState !== 'Locked' && <Button size="xs" onClick={() => onAction(`Approve ${asset.id}`)}>Approve</Button>}
+          {asset.lifecycleStatus !== 'Retired' && <Button size="xs" variant="ghost" onClick={() => onAction(`Regenerate ${asset.id}`)}><RefreshCw />Version</Button>}
         </div>
       </div>
     </article>
@@ -650,10 +652,21 @@ export function StudioApp() {
     setWorking(true);
     setError('');
     try {
-      const form = new FormData();
-      form.append('file', file);
-      const response = await fetch('/api/import', { method: 'POST', body: form });
-      const data = await response.json() as { project?: StudioProject; messages?: StudioMessage[]; error?: string };
+      const submitImport = async (confirmed: boolean) => {
+        const form = new FormData();
+        form.append('file', file);
+        if (confirmed) form.append('confirmMapping', 'true');
+        const response = await fetch('/api/import', { method: 'POST', body: form });
+        const data = await response.json() as { project?: StudioProject; messages?: StudioMessage[]; error?: string; requiresApproval?: boolean; mappingPreview?: { summary: { assets: number; references: number; sequenceVideos: number; prompts: number; reviewRequired: number } } };
+        return { response, data };
+      };
+      let { response, data } = await submitImport(false);
+      if (response.status === 202 && data.requiresApproval && data.mappingPreview) {
+        const summary = data.mappingPreview.summary;
+        const approved = globalThis.confirm(`Continuity Studio inspected this folder and proposes ${summary.assets} asset(s), ${summary.references} additional reference(s), ${summary.sequenceVideos} sequence video(s), and ${summary.prompts} prompt(s). ${summary.reviewRequired} mapping(s) need later review. Approve this mapping and create the project?`);
+        if (!approved) return;
+        ({ response, data } = await submitImport(true));
+      }
       if (!response.ok || !data.project) throw new Error(data.error || 'The project could not be imported.');
       setProject(data.project);
       setMessages(data.messages ?? []);
@@ -727,6 +740,22 @@ export function StudioApp() {
     setProjects(data.projects ?? projects);
   };
 
+  const cleanupStorage = useCallback(async () => {
+    if (!project) return;
+    setWorking(true);
+    setError('');
+    try {
+      const response = await fetch('/api/storage', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ projectId: project.id, expectedRevision: project.storageRevision }) });
+      const data = await response.json() as { project?: StudioProject; error?: string };
+      if (!response.ok || !data.project) throw new Error(data.error || 'Safe cleanup could not be completed.');
+      setProject(data.project);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'Safe cleanup could not be completed.');
+    } finally {
+      setWorking(false);
+    }
+  }, [project]);
+
   const filteredProjects = useMemo(() => projects.filter((item) => item.title.toLowerCase().includes(search.toLowerCase())), [projects, search]);
   const filteredAssets = useMemo(() => {
     if (!project) return [];
@@ -734,7 +763,9 @@ export function StudioApp() {
       : assetFilter === 'Approved' ? project.assets.filter((asset) => ['Approved', 'Locked'].includes(asset.approvalState))
         : assetFilter === 'Pending' ? project.assets.filter((asset) => asset.approvalState === 'Pending')
           : assetFilter === 'Needs Review' ? project.assets.filter((asset) => asset.approvalState === 'Needs Review')
-            : project.assets.filter((asset) => asset.category === assetFilter);
+            : assetFilter === 'Retired' ? project.assets.filter((asset) => asset.lifecycleStatus === 'Retired')
+              : assetFilter === 'Orphaned' ? project.assets.filter((asset) => project.production.control.orphanAssets.some((finding) => finding.assetId === asset.id && finding.status === 'Orphaned'))
+                : project.assets.filter((asset) => asset.category === assetFilter);
     return selected.slice().sort((a, b) => a.projectNumber - b.projectNumber);
   }, [assetFilter, project]);
 
@@ -789,6 +820,8 @@ export function StudioApp() {
           <AssetsView project={project} assets={filteredAssets} filter={assetFilter} setFilter={setAssetFilter} onAction={onAction} onAssetExport={() => void downloadAssets()} onNew={startNewMovie} />
         ) : view === 'exports' ? (
           <ExportsView project={project} onExport={() => downloadExport()} onAssetExport={() => void downloadAssets()} onNew={startNewMovie} />
+        ) : view === 'advanced' ? (
+          <AdvancedControlView project={project} working={working} onAction={onAction} onCleanup={() => void cleanupStorage()} onNew={startNewMovie} />
         ) : (
           <SettingsView project={project} lightMode={lightMode} setLightMode={(value) => { setLightMode(value); document.documentElement.classList.toggle('dark', !value); }} onUpdate={(settings) => void updateProject({ action: 'settings', settings })} />
         )}
@@ -867,6 +900,45 @@ function ExportsView({ project, onExport, onAssetExport, onNew }: { project: Stu
       <div className="rounded-2xl border border-amber-300/20 bg-card/55 p-5"><div className="flex items-start gap-4"><span className="grid size-12 shrink-0 place-items-center rounded-xl bg-amber-300/10 text-amber-200"><Download className="size-6" /></span><div><h2 className="font-medium">{project.flatAssetFolder.folderName}</h2><p className="mt-2 text-sm leading-6 text-muted-foreground">All approved generated visual assets together in one folder. No character, location, prop, category, or sequence subfolders.</p></div></div><div className="mt-5 flex flex-wrap gap-2"><Badge variant="outline">001 → final asset</Badge><Badge variant="outline">No subfolders</Badge><Badge variant="outline">Seedance-ready order</Badge></div><Button className="mt-6" onClick={onAssetExport}><Download />Download all assets</Button></div>
       <div className="rounded-2xl border border-border bg-card/55 p-5"><div className="flex items-start gap-4"><span className="grid size-12 shrink-0 place-items-center rounded-xl bg-secondary text-muted-foreground"><FileArchive className="size-6" /></span><div><h2 className="font-medium">{project.title} · Full Project</h2><p className="mt-2 text-sm leading-6 text-muted-foreground">Story, World Bible, prompts, continuity, references, reports, and the same flat numbered generated-asset folder.</p></div></div><div className="mt-5 flex flex-wrap gap-2"><Badge variant="outline">No API keys</Badge><Badge variant="outline">Original references</Badge><Badge variant="outline">Version history</Badge></div><Button className="mt-6" variant="outline" onClick={onExport}><FileArchive />Download full project</Button></div>
     </div>}
+  </PageFrame>;
+}
+
+function AdvancedControlView({ project, working, onAction, onCleanup, onNew }: { project: StudioProject | null; working: boolean; onAction: (message: string) => void; onCleanup: () => void; onNew: () => void }) {
+  const [storage, setStorage] = useState<{ totalBytes: number; originalBytes: number; generatedBytes: number; previewBytes: number; cleanupCandidates: Array<{ id: string }> } | null>(null);
+  useEffect(() => {
+    if (!project) return;
+    void (async () => {
+      try {
+        const response = await fetch(`/api/storage?projectId=${encodeURIComponent(project.id)}`, { cache: 'no-store' });
+        const data = await response.json() as { report?: typeof storage };
+        setStorage(data.report ?? null);
+      } catch { setStorage(null); }
+    })();
+  }, [project, project?.storageRevision]);
+  if (!project) return <PageFrame eyebrow="Optional diagnostics" title="Advanced Control" description="Relationships, confidence, lifecycle, comparisons, and storage stay behind this screen so everyday production remains chat-first."><EmptyCollection icon={Network} title="No active movie" text="Open a movie to inspect its production graph." action={<Button onClick={onNew}><Plus />Create a movie</Button>} /></PageFrame>;
+  const machine = project.production.control.stateMachine;
+  const blockers = project.production.control.warnings.filter((warning) => warning.severity === 'Blocker');
+  const recommendations = project.production.control.warnings.filter((warning) => warning.severity === 'Recommendation');
+  const orphaned = project.production.control.orphanAssets.filter((finding) => finding.status === 'Orphaned');
+  const lowConfidence = project.production.control.relationshipConfidence.filter((finding) => finding.reviewRequired);
+  const sequenceComparisons = project.production.control.comparisons.sequences.filter((comparison) => comparison.versions.length > 1 || comparison.versions.some((version) => version.mediaKey));
+  const assetComparisons = project.production.control.comparisons.assets.filter((comparison) => comparison.versions.length > 1);
+  const mb = (bytes: number) => `${(bytes / 1024 / 1024).toFixed(2)} MB`;
+  return <PageFrame eyebrow="Optional diagnostics" title="Advanced Control" description="Inspect the authoritative state machine, dependency graph, pins, inference confidence, version choices, and safe storage without moving these controls into the normal chat workflow." action={<Button variant="outline" onClick={() => onAction('repair this project')}><RefreshCw />Repair project</Button>}>
+    <div className="grid gap-4 xl:grid-cols-3">
+      <section className="rounded-2xl border border-border bg-card/55 p-5 xl:col-span-2">
+        <div className="flex items-center justify-between gap-3"><div><p className="eyebrow">Strict state machine</p><h2 className="mt-2 text-lg font-medium">{machine.current}</h2></div><Badge variant="outline" className={statusClass(machine.blockers.length ? 'Blocked' : 'Ready')}>{machine.blockers.length ? `${machine.blockers.length} blockers` : 'Legal'}</Badge></div>
+        <div className="mt-5 grid grid-cols-2 gap-2 sm:grid-cols-4">{['Story Draft', 'Story Approved', 'Assets Pending', 'Assets Approved', 'Sequences Ready', 'Production Started', 'Final Review', 'Completed'].map((state) => <div key={state} className={cn('rounded-xl border px-3 py-3 text-xs', state === machine.current ? 'border-amber-300/30 bg-amber-300/10 text-amber-100' : 'border-border bg-background/45 text-muted-foreground')}>{state}</div>)}</div>
+        <p className="mt-4 text-xs leading-5 text-muted-foreground"><span className="text-foreground">Legal now:</span> {machine.legalActions.join(', ')}. {machine.allowedNext.length ? `Next state: ${machine.allowedNext.join(', ')}.` : 'Terminal state.'}</p>
+      </section>
+      <section className="rounded-2xl border border-border bg-card/55 p-5"><p className="eyebrow">Storage</p><h2 className="mt-2 text-lg font-medium">{storage ? mb(storage.totalBytes) : 'Calculating…'}</h2><div className="mt-4 space-y-2 text-xs text-muted-foreground"><StatusLine label="Originals" value={storage ? mb(storage.originalBytes) : '—'} /><StatusLine label="Generated" value={storage ? mb(storage.generatedBytes) : '—'} /><StatusLine label="Previews" value={storage ? mb(storage.previewBytes) : '—'} /></div><Button className="mt-5 w-full" variant="outline" disabled={working || !storage?.cleanupCandidates.length} onClick={onCleanup}><Archive />Safe cleanup {storage?.cleanupCandidates.length ? `(${storage.cleanupCandidates.length})` : ''}</Button><p className="mt-3 text-[11px] leading-5 text-muted-foreground">Originals, approved files, provenance sources, and recovery points are always protected.</p></section>
+    </div>
+    <div className="mt-4 grid gap-4 lg:grid-cols-2">
+      <section className="rounded-2xl border border-border bg-card/55 p-5"><div className="flex items-center justify-between"><div><p className="eyebrow">Warnings</p><h2 className="mt-2 font-medium">Blockers vs recommendations</h2></div><ShieldCheck className="size-5 text-amber-200" /></div><div className="mt-4 space-y-2">{[...blockers.slice(0, 5), ...recommendations.slice(0, 5)].map((warning) => <div key={warning.id} className="rounded-xl border border-border bg-background/45 p-3"><div className="flex items-center gap-2"><Badge variant="outline" className={statusClass(warning.severity === 'Blocker' ? 'Blocked' : 'Ready')}>{warning.severity}</Badge><span className="text-xs text-muted-foreground">{warning.scope}</span></div><p className="mt-2 text-xs leading-5">{warning.message}</p></div>)}</div><p className="mt-4 text-xs text-muted-foreground">{lowConfidence.length} inferred relationship{lowConfidence.length === 1 ? '' : 's'} await review; every inference remains editable and unlocked.</p></section>
+      <section className="rounded-2xl border border-border bg-card/55 p-5"><p className="eyebrow">Permanent controls</p><h2 className="mt-2 font-medium">Pins, retirement, and orphans</h2><div className="mt-4 grid grid-cols-3 gap-2 text-center"><div className="rounded-xl bg-background/45 p-3"><p className="text-xl font-medium">{project.production.control.decisionPins.filter((pin) => pin.status === 'Active').length}</p><p className="mt-1 text-[10px] text-muted-foreground">Active pins</p></div><div className="rounded-xl bg-background/45 p-3"><p className="text-xl font-medium">{project.assets.filter((asset) => asset.lifecycleStatus === 'Retired').length}</p><p className="mt-1 text-[10px] text-muted-foreground">Retired</p></div><div className="rounded-xl bg-background/45 p-3"><p className="text-xl font-medium">{orphaned.length}</p><p className="mt-1 text-[10px] text-muted-foreground">Orphaned</p></div></div><div className="mt-4 space-y-2">{project.production.control.decisionPins.filter((pin) => pin.status === 'Active').slice(0, 5).map((pin) => <div key={pin.id} className="flex items-center gap-2 rounded-lg border border-border px-3 py-2 text-xs"><Lock className="size-3.5 text-amber-200" /><span className="truncate">{pin.targetType} · {pin.targetId}</span></div>)}{orphaned.slice(0, 4).map((finding) => <div key={finding.assetId} className="rounded-lg border border-rose-400/15 px-3 py-2 text-xs">Asset {assetNumber(finding.assetNumber)} · {finding.name} · orphaned</div>)}</div></section>
+    </div>
+    <section className="mt-4 rounded-2xl border border-border bg-card/55 p-5"><div className="flex items-center justify-between"><div><p className="eyebrow">Visual dependency viewer</p><h2 className="mt-2 font-medium">Story → assets → sequences → prompts → continuity</h2></div><Network className="size-5 text-sky-200" /></div><div className="mt-5 grid gap-2 md:grid-cols-2 xl:grid-cols-3">{project.production.dependencies.slice(0, 18).map((dependency) => <div key={dependency.id} className="rounded-xl border border-border bg-background/45 p-3 text-xs"><p className="truncate font-medium">{dependency.sourceId} → {dependency.targetId}</p><p className="mt-1 text-muted-foreground">{dependency.relationship}</p><Badge variant="outline" className={cn('mt-2', statusClass(dependency.freshness))}>{dependency.freshness}</Badge></div>)}</div></section>
+    <section className="mt-4 rounded-2xl border border-border bg-card/55 p-5"><p className="eyebrow">Side-by-side version choices</p><h2 className="mt-2 font-medium">Sequence and asset comparisons</h2>{sequenceComparisons.length + assetComparisons.length ? <div className="mt-4 grid gap-3 md:grid-cols-2">{[...sequenceComparisons, ...assetComparisons].slice(0, 12).map((comparison) => <div key={`${comparison.targetType}:${comparison.targetId}`} className="rounded-xl border border-border bg-background/45 p-3"><div className="flex items-center justify-between"><p className="text-xs font-medium">{comparison.targetId}</p><Badge variant="outline">{comparison.targetType}</Badge></div><div className="mt-3 flex gap-2 overflow-x-auto">{comparison.versions.map((version) => <div key={version.version} className={cn('min-w-32 rounded-lg border p-2 text-[11px]', version.version === comparison.approvedVersion ? 'border-emerald-400/30 bg-emerald-400/8' : 'border-border')}><p className="font-medium">V{String(version.version).padStart(2, '0')}</p><p className="mt-1 text-muted-foreground">{version.status}</p><p className="mt-1 truncate text-muted-foreground">{version.model}</p></div>)}</div></div>)}</div> : <p className="mt-4 text-xs text-muted-foreground">Regenerated assets and sequence results will appear here for side-by-side approval.</p>}</section>
   </PageFrame>;
 }
 

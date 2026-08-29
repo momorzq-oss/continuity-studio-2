@@ -168,16 +168,28 @@ function intelligenceStatements(project: StudioProject) {
     statements.push(
       productionRecord('render-job', job.id, job.status, job.sequenceNumber, job),
       DB.prepare(`INSERT INTO generation_jobs (
-        id, project_id, target_id, provider, model, prompt_version, reference_files_json, status,
+        id, project_id, target_id, provider, model, model_version, capability_revision, idempotency_key,
+        queue_position, submission_token, provider_request_id, prompt_version, reference_files_json, status,
         failure_message, retry_history_json, started_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(id) DO UPDATE SET provider = excluded.provider, model = excluded.model,
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET provider = excluded.provider, model = excluded.model, model_version = excluded.model_version,
+        capability_revision = excluded.capability_revision, idempotency_key = excluded.idempotency_key,
+        queue_position = excluded.queue_position, submission_token = excluded.submission_token, provider_request_id = excluded.provider_request_id,
         prompt_version = excluded.prompt_version, reference_files_json = excluded.reference_files_json,
         status = excluded.status, failure_message = excluded.failure_message,
         retry_history_json = excluded.retry_history_json, updated_at = excluded.updated_at`)
-        .bind(job.id, project.id, job.targetId, job.provider, job.model, plan?.revision ?? 1,
+        .bind(job.id, project.id, job.targetId, job.provider, job.model,
+          project.production.modelCapabilities.find((profile) => profile.provider === job.provider && profile.model === job.model)?.modelVersion ?? job.model,
+          project.production.modelCapabilities.find((profile) => profile.provider === job.provider && profile.model === job.model)?.capabilityRevision ?? 'unverified-1',
+          job.idempotencyKey, job.queuePosition, job.submissionToken, job.providerRequestId, plan?.revision ?? 1,
           JSON.stringify(plan?.referencePackage ?? {}), job.status, job.failureMessage,
           JSON.stringify(job.retryHistory), job.createdAt, job.updatedAt),
+      DB.prepare(`INSERT INTO generation_idempotency
+        (id, project_id, idempotency_key, job_id, provider_request_id, status, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(project_id, idempotency_key) DO UPDATE SET provider_request_id = excluded.provider_request_id,
+          status = excluded.status, updated_at = excluded.updated_at`)
+        .bind(`${project.id}:${job.id}:idempotency`, project.id, job.idempotencyKey, job.id, job.providerRequestId, job.status, job.createdAt, job.updatedAt),
     );
     if (job.resultMediaKey) {
       const provenance = project.production.control.resultProvenance.findLast((item) => item.sequenceNumber === job.sequenceNumber && item.resultMediaKey === job.resultMediaKey);
@@ -217,6 +229,26 @@ function intelligenceStatements(project: StudioProject) {
       (id, project_id, profile_id, revision, capability_json, refreshed_at) VALUES (?, ?, ?, ?, ?, ?)`)
       .bind(`${project.id}:${capability.id}:${capability.capabilityRevision}`, project.id, capability.id, capability.capabilityRevision, JSON.stringify(capability), capability.refreshedAt));
   }
+  statements.push(DB.prepare(`INSERT INTO project_control_state
+    (project_id, data_schema_version, lifecycle_state, control_json, updated_at) VALUES (?, ?, ?, ?, ?)
+    ON CONFLICT(project_id) DO UPDATE SET data_schema_version = excluded.data_schema_version,
+      lifecycle_state = excluded.lifecycle_state, control_json = excluded.control_json, updated_at = excluded.updated_at`)
+    .bind(project.id, project.production.control.dataSchema.currentVersion, project.production.control.stateMachine.current, JSON.stringify(project.production.control), project.updatedAt));
+  for (const pin of project.production.control.decisionPins) {
+    statements.push(DB.prepare(`INSERT INTO decision_pins
+      (id, project_id, target_type, target_id, field_name, value_json, status, created_at, released_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET status = excluded.status, released_at = excluded.released_at`)
+      .bind(pin.id, project.id, pin.targetType, pin.targetId, pin.field, pin.valueJson, pin.status, pin.createdAt, pin.releasedAt));
+  }
+  for (const attachment of project.attachments) {
+    statements.push(DB.prepare(`UPDATE asset_references SET reference_roles_json = ?, role_overrides_json = ?, excluded_traits_json = ?
+      WHERE id = ? AND project_id = ?`).bind(JSON.stringify(attachment.referenceRoles), JSON.stringify(attachment.roleOverrides ?? []), JSON.stringify(attachment.excludedTraits ?? []), attachment.id, project.id));
+  }
+  for (const warning of project.production.control.warnings) statements.push(productionRecord('production-warning', warning.id, warning.severity, null, warning));
+  for (const confidence of project.production.control.relationshipConfidence) statements.push(productionRecord('relationship-confidence', confidence.id, confidence.reviewRequired ? 'Review' : 'Accepted', null, confidence));
+  for (const orphan of project.production.control.orphanAssets) statements.push(productionRecord('orphan-detection', orphan.assetId, orphan.status, null, orphan));
+  for (const repair of project.production.control.repairReports) statements.push(productionRecord('repair-report', repair.id, repair.status, null, repair));
   statements.push(
     productionRecord('cost-ledger', 'current', 'Tracked', null, project.production.costLedger),
     productionRecord('final-assembly', project.production.finalAssembly.id, project.production.finalAssembly.status, null, project.production.finalAssembly),
@@ -274,11 +306,13 @@ async function createProjectGraph(project: StudioProject, messages: StudioMessag
     DB.prepare(`INSERT INTO projects (
       id, title, duration_seconds, sequence_duration_seconds, sequence_count, genre,
       story_status, film_bible_status, asset_status, sequence_status, continuity_status,
-      export_status, pinned, archived, state_json, created_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).bind(
+      export_status, pinned, archived, data_schema_version, lifecycle_state, export_identity, state_json, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).bind(
       project.id, project.title, project.durationSeconds, project.sequenceDurationSeconds, project.sequenceCount,
       project.genre, project.story.status, project.filmBible.status, 'Planned', 'Planned', project.continuity.status,
-      project.exportStatus, project.pinned ? 1 : 0, project.archived ? 1 : 0, JSON.stringify(project), project.createdAt, project.updatedAt,
+      project.exportStatus, project.pinned ? 1 : 0, project.archived ? 1 : 0, project.production.control.dataSchema.currentVersion,
+      project.production.control.stateMachine.current, project.production.control.exportIdentity.collisionSafeSlug,
+      JSON.stringify(project), project.createdAt, project.updatedAt,
     ),
     DB.prepare('INSERT INTO project_transactions (project_id, revision, last_transaction_id, updated_at) VALUES (?, ?, ?, ?)')
       .bind(project.id, project.storageRevision, transactionId, project.updatedAt),
@@ -295,10 +329,10 @@ async function createProjectGraph(project: StudioProject, messages: StudioMessag
     statements.push(
       DB.prepare(`INSERT INTO assets (
         id, project_id, stable_id, name, category, description, sequences_json, approval_state,
-        lock_state, current_version, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).bind(
+        lock_state, lifecycle_status, current_version, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).bind(
         assetRowId, project.id, asset.id, asset.name, asset.category, asset.description, JSON.stringify(asset.sequences),
-        asset.approvalState, asset.lockState, asset.version, project.createdAt, project.updatedAt,
+        asset.approvalState, asset.lockState, asset.lifecycleStatus, asset.version, project.createdAt, project.updatedAt,
       ),
       DB.prepare('INSERT INTO asset_versions (id, asset_id, version, description, approval_state, notes, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
         .bind(crypto.randomUUID(), assetRowId, asset.version, asset.description, asset.approvalState, asset.notes, project.createdAt),
@@ -349,12 +383,14 @@ async function persistProject(project: StudioProject, messages: StudioMessage[],
     DB.prepare(`UPDATE projects SET
       title = ?, duration_seconds = ?, sequence_duration_seconds = ?, sequence_count = ?, genre = ?,
       story_status = ?, film_bible_status = ?, asset_status = ?, sequence_status = ?, continuity_status = ?,
-      export_status = ?, pinned = ?, archived = ?, state_json = ?, updated_at = ? WHERE id = ?`).bind(
+      export_status = ?, pinned = ?, archived = ?, data_schema_version = ?, lifecycle_state = ?, export_identity = ?,
+      state_json = ?, updated_at = ? WHERE id = ?`).bind(
       project.title, project.durationSeconds, project.sequenceDurationSeconds, project.sequenceCount, project.genre,
       project.story.status, project.filmBible.status,
       project.assets.every((asset) => ['Approved', 'Locked'].includes(asset.approvalState)) ? 'Approved' : 'Pending',
       project.sequences.every((sequence) => sequence.status === 'Approved') ? 'Approved' : 'In progress',
       project.continuity.status, project.exportStatus, project.pinned ? 1 : 0, project.archived ? 1 : 0,
+      project.production.control.dataSchema.currentVersion, project.production.control.stateMachine.current, project.production.control.exportIdentity.collisionSafeSlug,
       JSON.stringify(project), project.updatedAt, project.id,
     ),
     DB.prepare('UPDATE project_transactions SET revision = ?, last_transaction_id = ?, updated_at = ? WHERE project_id = ?')
@@ -376,14 +412,14 @@ async function persistProject(project: StudioProject, messages: StudioMessage[],
     statements.push(
       DB.prepare(`INSERT INTO assets (
         id, project_id, stable_id, name, category, description, sequences_json, approval_state, lock_state,
-        current_version, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        lifecycle_status, current_version, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(project_id, stable_id) DO UPDATE SET
         name = excluded.name, category = excluded.category, description = excluded.description,
         sequences_json = excluded.sequences_json, approval_state = excluded.approval_state,
-        lock_state = excluded.lock_state, current_version = excluded.current_version, updated_at = excluded.updated_at`).bind(
+        lock_state = excluded.lock_state, lifecycle_status = excluded.lifecycle_status, current_version = excluded.current_version, updated_at = excluded.updated_at`).bind(
         rowId, project.id, asset.id, asset.name, asset.category, asset.description, JSON.stringify(asset.sequences),
-        asset.approvalState, asset.lockState, asset.version, project.createdAt, project.updatedAt,
+        asset.approvalState, asset.lockState, asset.lifecycleStatus, asset.version, project.createdAt, project.updatedAt,
       ),
       DB.prepare('INSERT OR IGNORE INTO asset_versions (id, asset_id, version, description, approval_state, notes, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
         .bind(crypto.randomUUID(), rowId, asset.version, asset.description, asset.approvalState, asset.notes, project.updatedAt),
@@ -491,6 +527,14 @@ export async function POST(request: Request) {
     const content = body.message?.trim();
     if (!content) return json({ error: 'Write an instruction for the studio.' }, { status: 400 });
     const beforeProject = structuredClone(project);
+    if (/repair this project/i.test(content)) {
+      const { DB, FILES } = getRuntimeEnv();
+      const media = await DB.prepare('SELECT id, media_key FROM asset_references WHERE project_id = ?').bind(project.id).all<{ id: string; media_key: string }>();
+      for (const item of media.results) {
+        const attachment = project.attachments.find((candidate) => candidate.id === item.id);
+        if (attachment) attachment.integrityStatus = await FILES.head(item.media_key) ? 'Verified' : 'Missing';
+      }
+    }
     const userMessage: StudioMessage = { id: `message_${crypto.randomUUID()}`, role: 'user', content, createdAt: nowIso() };
     const rollback = await resolveRollback(project, content);
     const result = rollback

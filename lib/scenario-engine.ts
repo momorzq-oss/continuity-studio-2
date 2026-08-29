@@ -244,7 +244,15 @@ export interface GenerationSnapshot {
   dialogue: DialogueLine[];
   referencePackageId: string;
   selectedReferenceIds: string[];
+  exactReferenceOrder: Array<{ id: string; uploadOrder: number; fileName: string }>;
   compiledPrompt: string;
+  structuredStateHash: string;
+  provider: string;
+  model: string;
+  modelVersion: string;
+  capabilityRevision: string;
+  providerSettings: { durationSeconds: number; resolution: string; maximumReferenceImages: number | null };
+  dataSchemaVersion: number;
   correctionRuleIds: string[];
   reason: 'Initial generation' | 'Regeneration' | 'Explicit revision';
   immutable: true;
@@ -486,12 +494,14 @@ export function rankSequenceReferences(project: StudioProject, sequence: StudioS
 
 export function compileSeedancePrompt(project: StudioProject, sequence: StudioSequence, scenario: SequenceScenario, references: RankedSequenceReference[], restrictions: string[], correctionRules: CorrectionMemoryRule[]) {
   const included = references.filter((item) => item.included);
+  const referenceOverrides = project.attachments.filter((attachment) => (attachment.roleOverrides?.length ?? 0) > 0 || (attachment.excludedTraits?.length ?? 0) > 0).map((attachment) => `${attachment.name}: use only for ${attachment.roleOverrides?.join(', ') || 'its approved roles'}; do not use for ${attachment.excludedTraits?.join(', ') || 'no excluded traits'}.`);
   const dialogue = scenario.dialogue.length ? scenario.dialogue.map((line) => `${line.turnOrder}. ${line.startSecond}-${line.endSecond}s — Asset ${numberLabel(line.speakerAssetNumber)} (${line.speakerName}) says exactly “${line.exactDialogue}”; locked language ${line.languageLock}; locked dialect ${line.dialectLock}; pronunciation ${line.pronunciations.map((item) => `${item.text} = ${item.pronunciation}${item.phonetic ? ` (${item.phonetic})` : ''}`).join(', ') || 'standard'}; ${line.emotion}; ${line.expression}; ${line.physicalAction}; listeners ${line.speakerLock.listenerAssetIds.join(', ') || 'none'}; then reaction assets ${line.reactionAssetIds.join(', ') || 'none'}.`).join('\n') : 'No spoken dialogue. Do not invent words.';
   return [
     `[SCENARIO]\n${scenario.id}. ${scenario.purposeCategory}: ${scenario.purpose}. Objective: ${scenario.activeStoryObjective}. Story development: ${scenario.storyDevelopment}.`,
     `[TIMING]\nExactly ${sequence.duration} seconds. Opening ${scenario.openingSituation}. Actions: ${scenario.actions.map((action) => `${action.startSecond}-${action.endSecond}s Asset ${numberLabel(action.actorAssetNumber)} ${action.verb}`).join('; ')}. Ending ${scenario.endingSituation}.`,
     `[CHARACTERS]\n${scenario.characterContinuity.map((state) => { const asset = project.assets.find((item) => item.id === state.assetId)!; return `Asset ${numberLabel(asset.projectNumber)} = ${asset.name}; permanent identity ${asset.generatedFileName}; costume assets ${state.currentAppearance.costumeAssetNumbers.map(numberLabel).join(', ') || 'story-defined'}; damage ${state.currentAppearance.damage}; transformation ${state.currentAppearance.transformation}; emotion ${state.emotion}; motivation ${state.motivation}; position ${state.position}; direction ${state.screenDirection}; knows before sequence: ${state.knowledgeBeforeSequence.map((item) => `${item.kind} ${item.fact}`).join('; ') || 'only approved prior story events'}.`; }).join('\n') || 'No named character.'}`,
     `[REFERENCE BINDINGS — ATTACH IN THIS ORDER]\n${included.map((item) => `${item.uploadOrder}. ${item.assetNumber ? `Asset ${numberLabel(item.assetNumber)} — ` : ''}${item.fileName} — ${item.role}: ${item.reason}`).join('\n') || 'No external reference.'}`,
+    `[REFERENCE ROLE OVERRIDES]\n${referenceOverrides.join('\n') || 'No user overrides.'}`,
     `[DIALOGUE BINDINGS]\n${dialogue}`,
     `[NON-SPEAKING CHARACTERS]\n${scenario.nonSpeakingCharacterAssetIds.map((id) => { const asset = project.assets.find((item) => item.id === id); return asset ? `Asset ${numberLabel(asset.projectNumber)} (${asset.name}) is present but must not speak, mouth words, or receive another character's line.` : id; }).join('\n') || 'None.'}`,
     `[ACTIONS AND OWNERSHIP]\n${scenario.actions.map((action) => `${action.order}. Asset ${numberLabel(action.actorAssetNumber)} owns “${action.verb}”; target ${action.targetAssetNumber ? `Asset ${numberLabel(action.targetAssetNumber)}` : 'none'}; hand ${action.hand}; screen direction ${action.screenDirection}; before ${action.objectVisibilityBefore}/${action.containmentBefore}; after ${action.objectVisibilityAfter}/${action.containmentAfter}; result ${action.resultingState}.`).join('\n')}`,

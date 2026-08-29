@@ -17,7 +17,19 @@ import {
   validateSequence,
 } from './production-system';
 import type { ProductionSystem } from './production-system';
-import { buildRelevantProjectContext, findDuplicateAsset } from './production-control';
+import {
+  activeDecisionPins,
+  buildRelevantProjectContext,
+  canPerformProjectAction,
+  createDecisionPin,
+  detectOrphanAssets,
+  findDuplicateAsset,
+  releaseDecisionPin,
+  repairProjectState,
+  retireProductionAsset,
+  searchProjectData,
+} from './production-control';
+import type { DecisionPin } from './production-control';
 
 export type Approval = 'Draft' | 'Approved';
 export type AssetApproval = 'Pending' | 'Approved' | 'Locked' | 'Needs Review';
@@ -41,6 +53,7 @@ export interface StudioAsset {
   sequences: number[];
   approvalState: AssetApproval;
   lockState: 'Unlocked' | 'Locked';
+  lifecycleStatus: 'Active' | 'Retired';
   version: number;
   referenceCount: number;
   notes: string;
@@ -371,9 +384,11 @@ export interface StudioProject {
     byteSize: number;
     createdAt: string;
     referenceRoles: string[];
+    roleOverrides?: string[];
+    excludedTraits?: string[];
     fingerprintSha256?: string;
     previewKind?: 'image-adaptive' | 'video-native' | 'document' | 'none';
-    integrityStatus?: 'Original' | 'Duplicate' | 'Missing' | 'Verified';
+    integrityStatus?: 'Original' | 'Duplicate' | 'Missing' | 'Corrupt' | 'Verified';
     linkedAssetId?: string;
     linkedAssetNumber?: number;
   }>;
@@ -428,20 +443,22 @@ export function formatAssetNumber(value: number) {
   return String(Math.max(0, Math.trunc(value))).padStart(3, '0');
 }
 
-function filenamePart(value: string) {
-  return value.normalize('NFKD').replace(/[^a-zA-Z0-9]+/g, '_').replace(/_+/g, '_').replace(/^_|_$/g, '').toUpperCase() || 'ASSET';
+export function sanitizePortableFilePart(value: string) {
+  const normalized = value.normalize('NFKD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-zA-Z0-9]+/g, '_').replace(/_+/g, '_').replace(/^_|_$/g, '').toUpperCase().slice(0, 72) || 'ASSET';
+  return /^(?:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$/i.test(normalized) ? `_${normalized}` : normalized;
 }
 
 export function numberedAssetFileName(asset: Pick<StudioAsset, 'projectNumber' | 'name'>) {
-  return `${formatAssetNumber(asset.projectNumber)}_${filenamePart(asset.name)}_GENERATED.png`;
+  return `${formatAssetNumber(asset.projectNumber)}_${sanitizePortableFilePart(asset.name)}_GENERATED.png`;
 }
 
 export function assetProductionReference(asset: Pick<StudioAsset, 'projectNumber' | 'name' | 'generatedFileName'>) {
   return `Asset ${formatAssetNumber(asset.projectNumber)} · ${asset.name} · ${asset.generatedFileName}`;
 }
 
-export function flatAssetFolderName(title: string) {
-  return `${filenamePart(title)}_ASSETS`;
+export function flatAssetFolderName(title: string, projectId?: string) {
+  const suffix = projectId ? `_${sanitizePortableFilePart(projectId).slice(-8)}` : '';
+  return `${sanitizePortableFilePart(title)}_ASSETS${suffix}`;
 }
 
 export function inferDurationSeconds(text: string, fallback = 180) {
@@ -549,7 +566,7 @@ function makeAssets(idea: string, sequenceCount: number, setting: string): Studi
       storyPurpose: 'Carries the audience through the story.',
       sequences: allSequences,
       approvalState: 'Pending',
-      lockState: 'Unlocked',
+      lockState: 'Unlocked', lifecycleStatus: 'Active',
       version: 1,
       referenceCount: 0,
       notes: 'A likeness reference can be attached directly in chat.',
@@ -564,7 +581,7 @@ function makeAssets(idea: string, sequenceCount: number, setting: string): Studi
       storyPurpose: 'Primary world and spatial anchor.',
       sequences: allSequences,
       approvalState: 'Pending',
-      lockState: 'Unlocked',
+      lockState: 'Unlocked', lifecycleStatus: 'Active',
       version: 1,
       referenceCount: 0,
       notes: '',
@@ -578,7 +595,7 @@ function makeAssets(idea: string, sequenceCount: number, setting: string): Studi
       ...makeAssetIntelligence('LOCATION_002', 'Location anchor', 'Locations'),
       description: 'An isolated camp whose layout and practical light sources remain spatially consistent.',
       storyPurpose: 'The story’s discovery point and primary source of unease.',
-      sequences: allSequences.filter((n) => n > Math.floor(sequenceCount / 3)), approvalState: 'Pending', lockState: 'Unlocked', version: 1, referenceCount: 0, notes: '',
+      sequences: allSequences.filter((n) => n > Math.floor(sequenceCount / 3)), approvalState: 'Pending', lockState: 'Unlocked', lifecycleStatus: 'Active', version: 1, referenceCount: 0, notes: '',
       continuityConstraints: ['Lock tent placement, fire state, entrances, and practical lights'],
     });
     assets.push({
@@ -586,7 +603,7 @@ function makeAssets(idea: string, sequenceCount: number, setting: string): Studi
       ...makeAssetIntelligence('INTERIOR_001', 'Location anchor', 'Interiors'),
       description: 'A structured tent interior with fixed entrances, furniture placement, practical-light positions, and camera access.',
       storyPurpose: 'Connected interior environment within LOCATION_002.',
-      sequences: allSequences.filter((n) => n > Math.floor(sequenceCount / 2)), approvalState: 'Pending', lockState: 'Unlocked', version: 1, referenceCount: 0, notes: '',
+      sequences: allSequences.filter((n) => n > Math.floor(sequenceCount / 2)), approvalState: 'Pending', lockState: 'Unlocked', lifecycleStatus: 'Active', version: 1, referenceCount: 0, notes: '',
       continuityConstraints: ['Lock entrance, bedroll, table, lantern hook, wall materials, and movement paths'],
     });
     assets.push({
@@ -594,7 +611,7 @@ function makeAssets(idea: string, sequenceCount: number, setting: string): Studi
       ...makeAssetIntelligence('FURNITURE_001', 'Recurring', 'Furniture'),
       description: 'A rough period-appropriate table permanently associated with INTERIOR_001 unless moved by a recorded event.',
       storyPurpose: 'Spatial landmark and object-placement surface.',
-      sequences: allSequences.filter((n) => n > Math.floor(sequenceCount / 2)), approvalState: 'Pending', lockState: 'Unlocked', version: 1, referenceCount: 0, notes: '',
+      sequences: allSequences.filter((n) => n > Math.floor(sequenceCount / 2)), approvalState: 'Pending', lockState: 'Unlocked', lifecycleStatus: 'Active', version: 1, referenceCount: 0, notes: '',
       continuityConstraints: ['Track placement, orientation, surface objects, and damage'],
     });
   }
@@ -603,7 +620,7 @@ function makeAssets(idea: string, sequenceCount: number, setting: string): Studi
     ...makeAssetIntelligence('ENVIRONMENT_001', 'Recurring', 'Environment States'),
     description: 'Weather, atmosphere, visibility, surface condition, tracks, debris, practical light, and environmental sound as one evolving state.',
     storyPurpose: 'Separates changing environmental conditions from permanent location identity.',
-    sequences: allSequences, approvalState: 'Pending', lockState: 'Unlocked', version: 1, referenceCount: 0, notes: '',
+    sequences: allSequences, approvalState: 'Pending', lockState: 'Unlocked', lifecycleStatus: 'Active', version: 1, referenceCount: 0, notes: '',
     continuityConstraints: ['Track weather, wind, dust, visibility, surface marks, fire, water, debris, and lighting progression'],
   });
   if (/car|truck|vehicle|motorcycle|aircraft|plane|boat|ship/.test(lower)) {
@@ -611,7 +628,7 @@ function makeAssets(idea: string, sequenceCount: number, setting: string): Studi
       id: 'VEHICLE_001', name: 'Story Vehicle', category: 'Vehicles',
       ...makeAssetIntelligence('VEHICLE_001', 'Recurring', 'Vehicles'),
       description: 'A period-correct recurring vehicle with stable exterior, interior, orientation, operating state, occupants, cargo, dirt, and damage.',
-      storyPurpose: 'Transportation and spatial continuity asset.', sequences: allSequences, approvalState: 'Pending', lockState: 'Unlocked', version: 1, referenceCount: 0, notes: '',
+      storyPurpose: 'Transportation and spatial continuity asset.', sequences: allSequences, approvalState: 'Pending', lockState: 'Unlocked', lifecycleStatus: 'Active', version: 1, referenceCount: 0, notes: '',
       continuityConstraints: ['Track driver, passengers, cargo, doors, lights, orientation, dirt, damage, and operating state'],
     });
   }
@@ -620,7 +637,7 @@ function makeAssets(idea: string, sequenceCount: number, setting: string): Studi
       id: 'WEAPON_001', name: 'Story Weapon', category: 'Weapons',
       ...makeAssetIntelligence('WEAPON_001', 'Story critical', 'Weapons'),
       description: 'A permanent weapon asset with period, material, owner, holder, activation, ammunition, damage, and sequence history.',
-      storyPurpose: 'Story-critical carried object.', sequences: allSequences.filter((n) => n >= Math.ceil(sequenceCount / 3)), approvalState: 'Pending', lockState: 'Unlocked', version: 1, referenceCount: 0, notes: '',
+      storyPurpose: 'Story-critical carried object.', sequences: allSequences.filter((n) => n >= Math.ceil(sequenceCount / 3)), approvalState: 'Pending', lockState: 'Unlocked', lifecycleStatus: 'Active', version: 1, referenceCount: 0, notes: '',
       continuityConstraints: ['Track owner, holder, location, activation, ammunition, visibility, and damage'],
     });
   }
@@ -629,7 +646,7 @@ function makeAssets(idea: string, sequenceCount: number, setting: string): Studi
       id: 'MECHANICAL_001', name: 'Mechanical System', category: 'Mechanical Systems',
       ...makeAssetIntelligence('MECHANICAL_001', 'Story critical', 'Mechanical Systems'),
       description: 'A component-based mechanical asset with mounting points, movement directions, power, connections, deployment, fold, and damage states.',
-      storyPurpose: 'Mechanically consistent transformation or action system.', sequences: allSequences.filter((n) => n >= Math.ceil(sequenceCount / 2)), approvalState: 'Pending', lockState: 'Unlocked', version: 1, referenceCount: 0, notes: '',
+      storyPurpose: 'Mechanically consistent transformation or action system.', sequences: allSequences.filter((n) => n >= Math.ceil(sequenceCount / 2)), approvalState: 'Pending', lockState: 'Unlocked', lifecycleStatus: 'Active', version: 1, referenceCount: 0, notes: '',
       continuityConstraints: ['Preserve component relationships, motion restrictions, scale, activation order, and damage'],
     });
   }
@@ -638,7 +655,7 @@ function makeAssets(idea: string, sequenceCount: number, setting: string): Studi
       id: 'CREATURE_001', name: 'The Presence', category: 'Creatures',
       ...makeAssetIntelligence('CREATURE_001', 'Story critical', 'Creatures'),
       description: 'An unsettling, partially obscured threat. Its scale, silhouette, and transformation state remain controlled.',
-      storyPurpose: 'Antagonistic force.', sequences: allSequences.filter((n) => n >= Math.ceil(sequenceCount / 2)), approvalState: 'Pending', lockState: 'Unlocked', version: 1, referenceCount: 0, notes: '',
+      storyPurpose: 'Antagonistic force.', sequences: allSequences.filter((n) => n >= Math.ceil(sequenceCount / 2)), approvalState: 'Pending', lockState: 'Unlocked', lifecycleStatus: 'Active', version: 1, referenceCount: 0, notes: '',
       continuityConstraints: ['Never duplicate', 'Lock silhouette, scale, damage, and behavior state'],
     });
   }
@@ -647,14 +664,14 @@ function makeAssets(idea: string, sequenceCount: number, setting: string): Studi
       id: 'ANIMAL_001', name: 'Traveller’s Camel', category: 'Animals',
       ...makeAssetIntelligence('ANIMAL_001', 'Recurring', 'Animals'),
       description: 'One identifiable camel with permanent tack, blanket, rope, and saddle references.',
-      storyPurpose: 'Transport and emotional continuity anchor.', sequences: allSequences, approvalState: 'Pending', lockState: 'Unlocked', version: 1, referenceCount: 0, notes: '',
+      storyPurpose: 'Transport and emotional continuity anchor.', sequences: allSequences, approvalState: 'Pending', lockState: 'Unlocked', lifecycleStatus: 'Active', version: 1, referenceCount: 0, notes: '',
       continuityConstraints: ['Exactly one camel', 'Track saddle, blanket, rope, injuries, and position'],
     });
     assets.push({
       id: 'PROP_001', name: 'Camel Saddle', category: 'Props',
       ...makeAssetIntelligence('PROP_001', 'Recurring', 'Props'),
       description: 'Period-appropriate saddle and tack, always mapped to ANIMAL_001.',
-      storyPurpose: 'Recurring visual and continuity detail.', sequences: allSequences, approvalState: 'Pending', lockState: 'Unlocked', version: 1, referenceCount: 0, notes: '',
+      storyPurpose: 'Recurring visual and continuity detail.', sequences: allSequences, approvalState: 'Pending', lockState: 'Unlocked', lifecycleStatus: 'Active', version: 1, referenceCount: 0, notes: '',
       continuityConstraints: ['Must remain attached to ANIMAL_001 unless the script records a change'],
     });
   }
@@ -665,7 +682,7 @@ function makeAssets(idea: string, sequenceCount: number, setting: string): Studi
       ...makeAssetIntelligence(lanternId, 'Story critical', 'Props'),
       name: 'Lantern', category: 'Props',
       description: 'A practical period-appropriate lantern whose owner, hand, flame, position, and damage are tracked.',
-      storyPurpose: 'Motivated light source and suspense device.', sequences: allSequences.filter((n) => n > 1), approvalState: 'Pending', lockState: 'Unlocked', version: 1, referenceCount: 0, notes: '',
+      storyPurpose: 'Motivated light source and suspense device.', sequences: allSequences.filter((n) => n > 1), approvalState: 'Pending', lockState: 'Unlocked', lifecycleStatus: 'Active', version: 1, referenceCount: 0, notes: '',
       continuityConstraints: ['Track who holds it, flame state, placement, and damage'],
     });
   }
@@ -673,7 +690,7 @@ function makeAssets(idea: string, sequenceCount: number, setting: string): Studi
     id: 'COSTUME_001', name: `${protagonist} Wardrobe`, category: 'Costumes',
     ...makeAssetIntelligence('COSTUME_001', 'Recurring', 'Costumes'),
     description: `A period-appropriate complete wardrobe for ${protagonist}, including footwear, accessories, and optional head covering.`,
-    storyPurpose: 'Locks the protagonist’s silhouette and temporal condition.', sequences: allSequences, approvalState: 'Pending', lockState: 'Unlocked', version: 1, referenceCount: 0, notes: '',
+    storyPurpose: 'Locks the protagonist’s silhouette and temporal condition.', sequences: allSequences, approvalState: 'Pending', lockState: 'Unlocked', lifecycleStatus: 'Active', version: 1, referenceCount: 0, notes: '',
     continuityConstraints: ['Track head covering, dust, tears, wetness, and blood'],
   });
   return assets.map((asset, index) => {
@@ -999,6 +1016,7 @@ function makeSequences(project: Omit<StudioProject, 'sequences' | 'production'>)
 
 export function createProjectFromIdea(idea: string): StudioProject {
   const createdAt = nowIso();
+  const projectId = uid('project');
   const [genre, subgenre] = inferGenre(idea);
   const { region, period, setting } = inferContext(idea);
   const durationSeconds = inferDurationSeconds(idea);
@@ -1035,7 +1053,7 @@ export function createProjectFromIdea(idea: string): StudioProject {
   const visualStyle = genre === 'Horror' ? 'Grounded atmospheric realism with controlled shadows and tactile texture' : 'Grounded cinematic realism with coherent production design';
   const lightingDirection = /night|dark/i.test(idea) ? 'Motivated night sources with protected facial identity' : 'Motivated naturalistic light with consistent direction';
   const projectBase: Omit<StudioProject, 'sequences' | 'production'> = {
-    id: uid('project'), storageRevision: 0, title, createdAt, updatedAt: createdAt, pinned: false, archived: false, idea,
+    id: projectId, storageRevision: 0, title, createdAt, updatedAt: createdAt, pinned: false, archived: false, idea,
     durationSeconds, sequenceDurationSeconds, sequenceCount, genre, subgenre, setting, region, period,
     dialogueLanguage: 'Story-defined', aspectRatio: '16:9', resolution: '4K',
     visualStyle,
@@ -1049,7 +1067,7 @@ export function createProjectFromIdea(idea: string): StudioProject {
     assets: [] as StudioAsset[], continuity: { status: 'Not started', events: [] as ContinuityEvent[] },
     flatAssetFolder: {
       rule: 'SINGLE FLAT ASSET FOLDER RULE',
-      folderName: flatAssetFolderName(title),
+      folderName: flatAssetFolderName(title, projectId),
       nextUnusedNumber: 1,
       namingFormat: 'NNN_NAME_GENERATED.png',
       subfoldersAllowed: false,
@@ -1123,6 +1141,7 @@ export function normalizeProject(project: StudioProject): StudioProject {
       ...asset,
       projectNumber,
       generatedFileName: numberedAssetFileName({ projectNumber, name: asset.name }),
+      lifecycleStatus: asset.lifecycleStatus ?? 'Active',
       importance,
       referenceDepth: asset.referenceDepth ?? defaults.referenceDepth,
       permanentIdentity: asset.permanentIdentity ?? asset.id,
@@ -1141,7 +1160,7 @@ export function normalizeProject(project: StudioProject): StudioProject {
   const highestAssetNumber = Math.max(0, ...next.assets.map((asset) => asset.projectNumber), ...previouslyReservedNumbers);
   next.flatAssetFolder = {
     rule: 'SINGLE FLAT ASSET FOLDER RULE',
-    folderName: flatAssetFolderName(next.title),
+    folderName: flatAssetFolderName(next.title, next.id),
     nextUnusedNumber: highestAssetNumber + 1,
     namingFormat: 'NNN_NAME_GENERATED.png',
     subfoldersAllowed: false,
@@ -1154,6 +1173,8 @@ export function normalizeProject(project: StudioProject): StudioProject {
   next.attachments = (next.attachments ?? []).filter((attachment) => !attachment.contentType?.startsWith('audio/')).map((attachment) => ({
     ...attachment,
     referenceRoles: attachment.referenceRoles ?? [attachment.role ?? 'Production reference'],
+    roleOverrides: attachment.roleOverrides ?? [],
+    excludedTraits: attachment.excludedTraits ?? [],
     linkedAssetNumber: attachment.linkedAssetNumber ?? (attachment.linkedAssetId ? assetNumbers.get(attachment.linkedAssetId) : undefined),
   }));
   const previousSequences = new Map((next.sequences ?? []).map((sequence) => [sequence.id, sequence]));
@@ -1180,7 +1201,7 @@ export function projectProgress(project: StudioProject) {
     project.story.status === 'Approved',
     project.worldBible.status === 'Approved',
     project.filmBible.status === 'Approved',
-    project.assets.length > 0 && project.assets.every((asset) => asset.approvalState === 'Locked' || asset.approvalState === 'Approved'),
+    project.assets.some((asset) => asset.lifecycleStatus !== 'Retired') && project.assets.filter((asset) => asset.lifecycleStatus !== 'Retired').every((asset) => asset.approvalState === 'Locked' || asset.approvalState === 'Approved'),
     project.sequences.some((sequence) => sequence.status === 'Approved'),
     project.sequences.length > 0 && project.sequences.every((sequence) => sequence.status === 'Approved'),
   ];
@@ -1229,11 +1250,60 @@ function message(content: string, metadata?: StudioMessage['metadata']): StudioM
   return { id: uid('message'), role: 'assistant', content, createdAt: nowIso(), metadata };
 }
 
+function decisionPinTarget(project: StudioProject, input: string): Omit<DecisionPin, 'id' | 'status' | 'approvedByUser' | 'createdAt' | 'releasedAt'> | null {
+  const lower = input.toLowerCase();
+  const number = Number(lower.match(/asset\s*0*(\d+)/)?.[1] ?? 0);
+  const sequenceNumber = Number(lower.match(/sequence\s*0*(\d+)/)?.[1] ?? project.currentSequence);
+  const explicitAsset = number ? project.assets.find((asset) => asset.projectNumber === number) : undefined;
+  const sequence = project.sequences.find((item) => item.number === sequenceNumber);
+  if (/character identity|face identity|likeness/.test(lower)) {
+    const asset = explicitAsset ?? project.assets.find((item) => item.category === 'Characters');
+    return asset ? { targetType: 'character-identity', targetId: asset.id, field: 'permanentIdentity', valueJson: JSON.stringify({ permanentIdentity: asset.permanentIdentity, version: asset.version, fileName: asset.generatedFileName }) } : null;
+  }
+  if (/costume|wardrobe|clothing/.test(lower)) {
+    const asset = explicitAsset ?? project.assets.find((item) => item.category === 'Costumes');
+    return asset ? { targetType: 'costume', targetId: asset.id, field: 'costume', valueJson: JSON.stringify(asset) } : null;
+  }
+  if (/location|interior/.test(lower)) {
+    const asset = explicitAsset ?? project.assets.find((item) => ['Locations', 'Interiors'].includes(item.category));
+    return asset ? { targetType: 'location', targetId: asset.id, field: 'location', valueJson: JSON.stringify(asset) } : null;
+  }
+  if (/dialogue|spoken line|exact line/.test(lower) && sequence) {
+    return { targetType: 'dialogue', targetId: sequence.id, field: 'dialogue', valueJson: JSON.stringify(project.production.sequencePlans[sequence.id]?.dialogue ?? []) };
+  }
+  if (/camera|lens|framing|screen direction/.test(lower)) {
+    return { targetType: 'camera-rule', targetId: project.id, field: 'camera', valueJson: JSON.stringify({ cameraStyle: project.cameraStyle, lensDirection: project.lensDirection }) };
+  }
+  if (/sequence version|sequence revision/.test(lower) && sequence) {
+    return { targetType: 'sequence-version', targetId: sequence.id, field: 'version', valueJson: JSON.stringify({ version: sequence.version, prompt: sequence.prompt }) };
+  }
+  if ((/asset version|regenerate|replace.*reference|retire/.test(lower)) && explicitAsset) {
+    return { targetType: 'asset-version', targetId: explicitAsset.id, field: 'version', valueJson: JSON.stringify({ version: explicitAsset.version, fileName: explicitAsset.generatedFileName }) };
+  }
+  return null;
+}
+
 export function interpretStudioMessage(project: StudioProject, input: string): { project: StudioProject; response: StudioMessage; sideEffect?: 'export' | 'asset-export' } {
   const next = normalizeProject(project);
   const lower = input.trim().toLowerCase();
   next.updatedAt = nowIso();
   buildRelevantProjectContext(next, input);
+
+  const pinTarget = decisionPinTarget(next, input);
+  if (pinTarget && /(?:^|\b)(?:release|unlock)\b|approve (?:changing|change to)/i.test(input)) {
+    const released = releaseDecisionPin(next, pinTarget.targetType, pinTarget.targetId);
+    refreshProductionSystem(next);
+    return { project: next, response: message(released.length ? `Released ${released.length} approved ${pinTarget.targetType.replaceAll('-', ' ')} pin${released.length === 1 ? '' : 's'}. The value is editable again; the prior pinned decision remains in history.` : 'No matching active decision pin was found, so nothing changed.', { kind: 'control' }) };
+  }
+  if (pinTarget && /(?:^|\b)(?:pin|lock)\b|lock permanently|permanent lock/i.test(input) && !/approve|lock all assets|identity-locked|language|dialect/i.test(input)) {
+    const pin = createDecisionPin(next, pinTarget);
+    refreshProductionSystem(next);
+    return { project: next, response: message(`Pinned ${pin.targetType.replaceAll('-', ' ')} for ${pin.targetId}. This exact approved value cannot be changed by inference, regeneration, story edits, or provider output until you explicitly release the pin.`, { kind: 'control' }) };
+  }
+  if (pinTarget && /change|replace|update|regenerate|retire|remove/i.test(input)) {
+    const pins = activeDecisionPins(next, pinTarget.targetId);
+    if (pins.length) return { project: next, response: message(`That change is blocked by approved pin ${pins[0].id}. Say “unlock ${pinTarget.targetType.replaceAll('-', ' ')} ${pinTarget.targetId}” first; nothing was changed.`, { kind: 'control' }) };
+  }
 
   const requestedDuration = inferDurationSeconds(input, 0);
   if (requestedDuration > 0 && /(make it|change|duration|movie|minute)/.test(lower)) {
@@ -1254,6 +1324,7 @@ export function interpretStudioMessage(project: StudioProject, input: string): {
     return { project: next, response: message(`Story approved. World Bible v${next.worldBible.version} now defines the geography, period, culture, technology, architecture, materials, climate, physical rules, and prohibited anachronisms for this production.`, { kind: 'world' }) };
   }
   if (/approve(?: the)? world bible|world bible approved|approve world/.test(lower)) {
+    if (!canPerformProjectAction(next, 'approve-world')) return { project: next, response: message(`World Bible approval is not legal while the project is ${next.production.control.stateMachine.current}. Approve the story first; no state changed.`, { kind: 'control' }) };
     next.worldBible.status = 'Approved';
     resolveDependencyTarget(next, 'WORLD_BIBLE', `World Bible v${next.worldBible.version} approved.`);
     next.stage = 'Film Bible';
@@ -1263,6 +1334,7 @@ export function interpretStudioMessage(project: StudioProject, input: string): {
     return { project: next, response: message(`The World Bible is ${next.worldBible.status.toLowerCase()}: ${next.worldBible.geography}, ${next.worldBible.historicalPeriod}, ${next.worldBible.technologyLevel}. It governs ${next.locations.length} structured locations and ${next.environments.length} environment state${next.environments.length === 1 ? '' : 's'}.`, { kind: 'world' }) };
   }
   if (/approve(?: the)? film bible|film bible approved|approve bible/.test(lower)) {
+    if (!canPerformProjectAction(next, 'approve-film')) return { project: next, response: message(`Film Bible approval is not legal while the project is ${next.production.control.stateMachine.current}. Approve the story and World Bible first; no state changed.`, { kind: 'control' }) };
     next.filmBible.status = 'Approved';
     resolveDependencyTarget(next, 'FILM_BIBLE', `Film Bible v${next.filmBible.version} approved.`);
     next.stage = 'Assets';
@@ -1281,8 +1353,9 @@ export function interpretStudioMessage(project: StudioProject, input: string): {
     return { project: next, response: message(`${mainCharacter.referenceCount} reference image${mainCharacter.referenceCount === 1 ? ' is' : 's are'} attached to one identity: ${assetProductionReference(mainCharacter)}. Coverage is tracked by face, profile, body, rear, costume, material, and continuity role without creating duplicate people or numbers.`, { kind: 'coverage', assetIds: [mainCharacter.id] }) };
   }
   if (/approve all assets|lock all assets/.test(lower)) {
-    next.assets = next.assets.map((asset) => ({ ...asset, approvalState: 'Locked', lockState: 'Locked' }));
-    next.assets.forEach((asset) => resolveDependencyTarget(next, asset.id, `${assetProductionReference(asset)} approved and locked.`));
+    if (!canPerformProjectAction(next, 'approve-assets')) return { project: next, response: message(`Asset approval is not legal while the project is ${next.production.control.stateMachine.current}. Complete the approved story, World Bible, and Film Bible first; no asset changed.`, { kind: 'control' }) };
+    next.assets = next.assets.map((asset) => asset.lifecycleStatus === 'Retired' ? asset : ({ ...asset, approvalState: 'Locked', lockState: 'Locked' }));
+    next.assets.filter((asset) => asset.lifecycleStatus !== 'Retired').forEach((asset) => resolveDependencyTarget(next, asset.id, `${assetProductionReference(asset)} approved and locked.`));
     next.stage = 'Sequences';
     return { project: next, response: message(`All ${next.assets.length} assets are approved and locked. The ${next.sequenceCount}-sequence plan is ready for review.`, { kind: 'sequence', sequenceNumber: 1 }) };
   }
@@ -1322,7 +1395,7 @@ export function interpretStudioMessage(project: StudioProject, input: string): {
       description: `New ${descriptor.category.toLowerCase()} production asset introduced through project chat.`,
       storyPurpose: 'User-directed production requirement.',
       sequences,
-      approvalState: 'Pending', lockState: 'Unlocked', version: 1, referenceCount: 0,
+      approvalState: 'Pending', lockState: 'Unlocked', lifecycleStatus: 'Active', version: 1, referenceCount: 0,
       notes: 'Permanent project number assigned at creation. This number is never reused or changed.',
       continuityConstraints: ['Keep this permanent asset number across regeneration, replacement, prompts, continuity, and export'],
       ...makeAssetIntelligence(id, ['Characters', 'Locations', 'Interiors', 'Weapons', 'Transformation Sheets'].includes(descriptor.category) ? 'Story critical' : 'Recurring', descriptor.category),
@@ -1353,6 +1426,28 @@ export function interpretStudioMessage(project: StudioProject, input: string): {
   }
 
   const asset = findAsset(next, input);
+  if (asset && /(?:remove|write out).*(?:from (?:the )?(?:active )?(?:story|sequences)|no longer appears)/.test(lower)) {
+    asset.sequences = [];
+    for (const sequenceItem of next.sequences) {
+      sequenceItem.assetIds = sequenceItem.assetIds.filter((id) => id !== asset.id);
+      sequenceItem.assetNumbers = sequenceItem.assetNumbers.filter((number) => number !== asset.projectNumber);
+      sequenceItem.assetFiles = sequenceItem.assetFiles.filter((fileName) => fileName !== asset.generatedFileName);
+      if (sequenceItem.status === 'Approved') sequenceItem.status = 'Needs Review';
+    }
+    next.production.control.orphanAssets = detectOrphanAssets(next);
+    markDependencyChange(next, asset.id, `Story edit disconnected Asset ${formatAssetNumber(asset.projectNumber)} from active sequences.`);
+    refreshProductionSystem(next);
+    return { project: next, response: message(`${assetProductionReference(asset)} is no longer connected to an active sequence and is flagged Orphaned. It was not deleted or retired, and Asset ${formatAssetNumber(asset.projectNumber)} remains reserved. You can reconnect it or explicitly retire it.`, { kind: 'control', assetIds: [asset.id] }) };
+  }
+  if (asset && /(?:retire|mark .*retired|stop using)/.test(lower)) {
+    try {
+      const record = retireProductionAsset(next, asset, input);
+      refreshProductionSystem(next);
+      return { project: next, response: message(`Retired ${assetProductionReference(asset)}. Asset ${formatAssetNumber(asset.projectNumber)} remains permanently reserved, its existing sequence links and version history are preserved, and it will never be reassigned. ${record.linkedSequenceNumbers.length ? `Historical links remain in Sequences ${record.linkedSequenceNumbers.join(', ')}.` : 'It currently has no sequence links.'}`, { kind: 'control', assetIds: [asset.id] }) };
+    } catch (cause) {
+      return { project: next, response: message(cause instanceof Error ? cause.message : 'The asset could not be retired.', { kind: 'control', assetIds: [asset.id] }) };
+    }
+  }
   if (asset && /(?:replace|change|update).*(?:reference|image).*(?:latest|last) attachment/.test(lower)) {
     const attachment = next.attachments.at(-1);
     if (!attachment || !attachment.contentType.startsWith('image/')) return { project: next, response: message(`Attach the replacement visual reference first. Asset ${formatAssetNumber(asset.projectNumber)} remains unchanged.`, { kind: 'control', assetIds: [asset.id] }) };
@@ -1383,6 +1478,7 @@ export function interpretStudioMessage(project: StudioProject, input: string): {
     return { project: next, response: message(`Asset ${formatAssetNumber(asset.projectNumber)} is now version ${asset.version} using “${attachment.name}”. No asset or sequence was renumbered; affected dependencies are marked for review and the prior version remains in history.`, { kind: 'control', assetIds: [asset.id] }) };
   }
   if (asset && /approve|lock/.test(lower)) {
+    if (!['Assets Pending', 'Assets Approved', 'Sequences Ready', 'Production Started'].includes(next.production.control.stateMachine.current)) return { project: next, response: message(`Asset approval is not legal while the project is ${next.production.control.stateMachine.current}. Complete the story and Bible approvals first; nothing changed.`, { kind: 'control', assetIds: [asset.id] }) };
     asset.approvalState = 'Locked';
     asset.lockState = 'Locked';
     resolveDependencyTarget(next, asset.id, `${assetProductionReference(asset)} approved and locked.`);
@@ -1425,6 +1521,64 @@ export function interpretStudioMessage(project: StudioProject, input: string): {
   if (/show (?:me )?(?:all )?assets|how many assets|asset manifest|\/assets/.test(lower)) {
     const counts = Object.entries(next.assets.reduce<Record<string, number>>((acc, item) => { acc[item.category] = (acc[item.category] ?? 0) + 1; return acc; }, {}));
     return { project: next, response: message(`${next.assets.length} permanently numbered assets in ${next.flatAssetFolder.folderName}, from Asset ${formatAssetNumber(next.assets[0]?.projectNumber ?? 0)} through Asset ${formatAssetNumber(next.assets.at(-1)?.projectNumber ?? 0)}: ${counts.map(([category, count]) => `${count} ${category.toLowerCase()}`).join(', ')}. All categories share this one sequence.`, { kind: 'assets', assetIds: next.assets.map((item) => item.id) }) };
+  }
+  if (/orphan|unused asset|no longer connected/.test(lower)) {
+    next.production.control.orphanAssets = detectOrphanAssets(next);
+    const orphaned = next.production.control.orphanAssets.filter((finding) => finding.status === 'Orphaned');
+    return { project: next, response: message(orphaned.length ? `${orphaned.length} active orphaned asset${orphaned.length === 1 ? '' : 's'} detected: ${orphaned.map((finding) => `Asset ${formatAssetNumber(finding.assetNumber)} ${finding.name}`).join(', ')}. Nothing was deleted or renumbered; retire or reconnect each asset explicitly.` : 'No active orphaned assets were found. Every active asset is connected to at least one sequence; retired numbers remain reserved.', { kind: 'control', assetIds: orphaned.map((finding) => finding.assetId) }) };
+  }
+
+  const latestAttachment = next.attachments.at(-1);
+  const onlyRole = input.match(/use (?:this|the latest attachment|latest attachment) only for (face identity|identity|face|clothing|costume|location|pose|style|body|profile)/i)?.[1];
+  if (latestAttachment && onlyRole) {
+    const roleMap: Record<string, string> = { 'face identity': 'Face identity', identity: 'Identity', face: 'Face', clothing: 'Costume', costume: 'Costume', location: 'Location', pose: 'Pose', style: 'Style', body: 'Body', profile: 'Profile' };
+    latestAttachment.roleOverrides = [roleMap[onlyRole.toLowerCase()]];
+    latestAttachment.referenceRoles = [...latestAttachment.roleOverrides];
+    refreshProductionSystem(next);
+    return { project: next, response: message(`“${latestAttachment.name}” is now restricted to ${latestAttachment.roleOverrides[0]} only. Automatic interpretation cannot use it for any other visual trait.`, { kind: 'attachment', attachmentId: latestAttachment.id, assetIds: latestAttachment.linkedAssetId ? [latestAttachment.linkedAssetId] : undefined }) };
+  }
+  const excludedReferenceTrait = input.match(/do not use (?:this|the latest attachment|latest attachment)(?: reference)? for ([^.,]+)/i)?.[1]?.trim();
+  if (latestAttachment && excludedReferenceTrait) {
+    latestAttachment.excludedTraits = [...new Set([...(latestAttachment.excludedTraits ?? []), excludedReferenceTrait])];
+    refreshProductionSystem(next);
+    return { project: next, response: message(`“${latestAttachment.name}” will not be used for ${excludedReferenceTrait}. The exclusion is part of the structured reference binding, not merely chat text.`, { kind: 'attachment', attachmentId: latestAttachment.id }) };
+  }
+
+  if (/where does .* appear|which sequences? (?:use|contain|include)|project search|search (?:the )?project/.test(lower)) {
+    const results = searchProjectData(next, input);
+    return { project: next, response: message(results.length ? results.map((result) => `Asset ${formatAssetNumber(result.assetNumber)} ${result.name} (${result.lifecycleStatus}) appears in ${result.sequences.length ? result.sequences.map((sequenceResult) => `Sequence ${sequenceResult.number} “${sequenceResult.title}”`).join(', ') : 'no active sequence'}.`).join(' ') : 'The structured project database has no matching asset or sequence relationship. No answer was inferred from old prompts or filenames alone.', { kind: 'control', assetIds: results.map((result) => result.assetId) }) };
+  }
+
+  if (/compare .*versions?|side by side/.test(lower)) {
+    const assetNumber = Number(lower.match(/asset\s*0*(\d+)/)?.[1] ?? 0);
+    const comparedSequence = Number(lower.match(/sequence\s*0*(\d+)/)?.[1] ?? 0);
+    const comparison = assetNumber
+      ? next.production.control.comparisons.assets.find((item) => next.assets.find((assetItem) => assetItem.projectNumber === assetNumber)?.id === item.targetId)
+      : next.production.control.comparisons.sequences.find((item) => item.targetId === `SEQUENCE_${String(comparedSequence).padStart(3, '0')}`);
+    return { project: next, response: message(comparison ? `${comparison.targetId} comparison: ${comparison.versions.map((version) => `V${String(version.version).padStart(2, '0')} ${version.status}${version.mediaKey ? ` · ${version.mediaKey}` : ''} · ${version.provider} ${version.model}`).join(' | ')}. ${comparison.approvedVersion ? `V${String(comparison.approvedVersion).padStart(2, '0')} is approved.` : 'No version is approved yet.'} Open Advanced Control for the side-by-side version list.` : 'Name a valid Asset or Sequence number with at least one stored version to compare.', { kind: 'control', sequenceNumber: comparedSequence || undefined }) };
+  }
+
+  if (/repair this project/.test(lower)) {
+    const report = repairProjectState(next);
+    refreshProductionSystem(next);
+    return { project: next, response: message(`Project repair ${report.status.toLowerCase()}. ${report.repaired.length ? `Safe repairs: ${report.repaired.join(' ')}` : 'No safe relationship, numbering, reference, approval, dependency, or continuity repair was needed.'} ${report.requiresUserInput.length ? `User review required: ${report.requiresUserInput.join(' ')}` : 'Nothing requires user input.'}`, { kind: 'integrity' }) };
+  }
+
+  if (/project state machine|legal next actions|what can i do now/.test(lower)) {
+    const machine = next.production.control.stateMachine;
+    return { project: next, response: message(`Project state: ${machine.current}. Legal actions: ${machine.legalActions.join(', ')}. ${machine.allowedNext.length ? `The only forward state is ${machine.allowedNext.join(' or ')}.` : 'This is the terminal production state.'} ${machine.blockers.length ? `Current blockers: ${machine.blockers.join(' ')}` : 'No state-machine blockers.'}`, { kind: 'control' }) };
+  }
+
+  if (/production warnings|blockers and recommendations|confidence review/.test(lower)) {
+    const blockers = next.production.control.warnings.filter((warning) => warning.severity === 'Blocker');
+    const recommendations = next.production.control.warnings.filter((warning) => warning.severity === 'Recommendation');
+    const lowConfidence = next.production.control.relationshipConfidence.filter((finding) => finding.reviewRequired);
+    return { project: next, response: message(`${blockers.length} true blocker${blockers.length === 1 ? '' : 's'}, ${recommendations.length} recommendation${recommendations.length === 1 ? '' : 's'}, and ${lowConfidence.length} low-confidence inferred relationship${lowConfidence.length === 1 ? '' : 's'}. ${blockers.map((item) => `BLOCKER: ${item.message}`).join(' ')} ${recommendations.slice(0, 4).map((item) => `Recommendation: ${item.message}`).join(' ')}`, { kind: 'control' }) };
+  }
+
+  if (/storage size|storage usage|cleanup storage|clean up storage/.test(lower)) {
+    const storage = next.production.control.storage;
+    return { project: next, response: message(`Project storage metadata currently accounts for ${(storage.totalBytes / 1024 / 1024).toFixed(2)} MB. Originals and approved files are protected. ${storage.cleanupCandidateIds.length} unused preview or failed-generation candidate${storage.cleanupCandidateIds.length === 1 ? '' : 's'} can be reviewed from Advanced Control; cleanup never removes originals, approved assets, approved sequence sources, or recovery records.`, { kind: 'control' }) };
   }
   if (/missing asset|production risk|look ahead|future asset/.test(lower)) {
     const critical = next.assets.filter((item) => item.importance === 'Story critical' || item.importance === 'Location anchor');
@@ -1562,6 +1716,8 @@ export function interpretStudioMessage(project: StudioProject, input: string): {
 
   const exactDialogue = input.match(/(?:says?|dialogue(?: is)?|line(?: is)?)\s*[“"]([^”"]+)[”"]/i)?.[1]?.trim();
   if (sequence && asset && exactDialogue) {
+    const dialoguePins = activeDecisionPins(next, sequence.id).filter((pin) => pin.targetType === 'dialogue');
+    if (dialoguePins.length) return { project: next, response: message(`${sequence.id} dialogue is protected by approved pin ${dialoguePins[0].id}. Explicitly unlock the dialogue before adding or changing a line; nothing changed.`, { kind: 'control', sequenceNumber: sequence.number }) };
     if (asset.category !== 'Characters') return { project: next, response: message(`${assetProductionReference(asset)} cannot own spoken dialogue because it is not a character identity. Choose the exact numbered character speaker; no line was stored.`, { kind: 'dialogue', sequenceNumber: sequence.number, assetIds: [asset.id] }) };
     addDialogueLine(next, sequence, asset, exactDialogue);
     return { project: next, response: message(`${assetProductionReference(asset)} now owns the exact line “${exactDialogue}” in ${sequence.id}. Turn order, language, dialect, emotion, expression, timing, physical action, addressee, reactions, current costume, and approved visual bindings are stored with the line. Seedance generates the spoken result inside the video; no separate sound asset is created.`, { kind: 'dialogue', sequenceNumber: sequence.number, assetIds: [asset.id] }) };
@@ -1698,6 +1854,7 @@ export function interpretStudioMessage(project: StudioProject, input: string): {
     return { project: next, response: message(`${sequence.id} revision V${String(checkpoint.sequenceRevision).padStart(2, '0')} is approved and locked. Checkpoint ${checkpoint.id} preserves asset, spatial, physical, environmental, lighting, time, Seedance sound-instruction, entry/exit, and object states as the expected opening for ${following?.id ?? 'final assembly'}.${checkpoint.lastFrameKey ? ` The generated result supplied continuity frame ${checkpoint.lastFrameKey} automatically.` : ' Import the generated video result to create its first-frame and last-frame continuity keys automatically.'}`, { kind: 'validation', sequenceNumber: sequence.number }) };
   }
   if (sequence && /prepare (?:an )?(?:external )?(?:seedance )?(?:package|workflow)/.test(lower)) {
+    if (!canPerformProjectAction(next, 'prepare-generation')) return { project: next, response: message(`Generation preparation is not legal while the project is ${next.production.control.stateMachine.current}. Complete the state-machine blockers first; no prompt or paid request was created.`, { kind: 'control', sequenceNumber: sequence.number }) };
     const job = queueSequenceGeneration(next, sequence);
     if (next.production.sequencePlans[sequence.id].readinessChecklist.readyForGeneration) {
       job.status = 'External';
@@ -1707,6 +1864,7 @@ export function interpretStudioMessage(project: StudioProject, input: string): {
     return { project: next, response: message(`${sequence.id} external Seedance package is ${job.status.toLowerCase()}. ${plan.referencePackage.uploadInstruction} Then paste the provider translation and generate outside the Studio. Attach the finished video here and say “Use latest attachment as ${sequence.id} result” to validate, approve, extract the ending-frame key, and continue.`, { kind: 'reference-package', sequenceNumber: sequence.number }) };
   }
   if (sequence && /generate/.test(lower)) {
+    if (!canPerformProjectAction(next, 'prepare-generation')) return { project: next, response: message(`Generation is blocked while the project is ${next.production.control.stateMachine.current}. The Studio will not jump past story, Bible, asset, or sequence readiness; no provider request or credit was created.`, { kind: 'control', sequenceNumber: sequence.number }) };
     const blockers: string[] = [];
     if (next.story.status !== 'Approved') blockers.push('story approval');
     if (next.worldBible.status !== 'Approved') blockers.push('World Bible approval');
@@ -1879,6 +2037,7 @@ export function interpretStudioMessage(project: StudioProject, input: string): {
   if (/final assembly|final quality|quality check/.test(lower)) {
     const { assembly, quality } = runFinalAssemblyCheck(next);
     if (/approve final assembly/.test(lower)) {
+      if (!canPerformProjectAction(next, 'approve-final')) return { project: next, response: message(`Final assembly approval is not legal while the project is ${next.production.control.stateMachine.current}. Every sequence must be approved before the project can enter Final Review.`, { kind: 'control' }) };
       if (assembly.missingSequenceNumbers.length || quality.status !== 'Passed') {
         return { project: next, response: message(`Final assembly cannot be approved yet. ${assembly.missingSequenceNumbers.length ? `Sequences ${assembly.missingSequenceNumbers.join(', ')} are not approved.` : ''} Final quality is ${quality.status.toLowerCase()}; resolve every failed check without changing approved material unnecessarily.`, { kind: 'assembly' }) };
       }
@@ -1893,7 +2052,7 @@ export function interpretStudioMessage(project: StudioProject, input: string): {
     const approvedAssets = next.assets.filter((item) => item.approvalState === 'Locked' || item.approvalState === 'Approved').length;
     const approvedSequences = next.sequences.filter((item) => item.status === 'Approved').length;
     const stale = next.production.dependencies.filter((item) => item.freshness !== 'Current').length;
-    return { project: next, response: message(`${next.title}: ${next.production.readiness}. Pipeline ${next.production.currentPipelineStage}. Story ${next.story.status}${next.production.storyLock.status === 'Locked' ? ' and locked' : ''}. World Bible ${next.worldBible.status}. Film Bible ${next.filmBible.status}. Assets ${approvedAssets}/${next.assets.length} approved. Sequences ${approvedSequences}/${next.sequenceCount} approved. ${stale} dependency impact${stale === 1 ? '' : 's'}. ${next.production.renderQueue.length} render job${next.production.renderQueue.length === 1 ? '' : 's'}. Continuity ${next.continuity.status}. Next: ${next.production.nextLogicalAction}`, { kind: 'readiness', sequenceNumber: next.currentSequence }) };
+    return { project: next, response: message(`${next.title}: project state ${next.production.control.stateMachine.current}; ${next.production.readiness}. Pipeline ${next.production.currentPipelineStage}. Story ${next.story.status}${next.production.storyLock.status === 'Locked' ? ' and locked' : ''}. World Bible ${next.worldBible.status}. Film Bible ${next.filmBible.status}. Assets ${approvedAssets}/${next.assets.length} approved, ${next.assets.filter((item) => item.lifecycleStatus === 'Retired').length} retired, ${next.production.control.orphanAssets.filter((item) => item.status === 'Orphaned').length} orphaned. Sequences ${approvedSequences}/${next.sequenceCount} approved. ${stale} dependency impact${stale === 1 ? '' : 's'}. ${next.production.renderQueue.length} render job${next.production.renderQueue.length === 1 ? '' : 's'}. Continuity ${next.continuity.status}. Legal next: ${next.production.control.stateMachine.legalActions.join(', ')}.`, { kind: 'readiness', sequenceNumber: next.currentSequence }) };
   }
 
   if (/download (?:all |movie |project )?assets|export (?:all )?assets|flat asset folder|single flat asset folder/.test(lower)) {

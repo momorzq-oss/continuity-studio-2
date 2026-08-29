@@ -23,6 +23,9 @@ export const projects = sqliteTable(
     exportStatus: text('export_status').notNull().default('Not exported'),
     pinned: integer('pinned', { mode: 'boolean' }).notNull().default(false),
     archived: integer('archived', { mode: 'boolean' }).notNull().default(false),
+    dataSchemaVersion: integer('data_schema_version').notNull().default(4),
+    lifecycleState: text('lifecycle_state').notNull().default('Story Draft'),
+    exportIdentity: text('export_identity').notNull().default(''),
     stateJson: text('state_json').notNull(),
     ...timestamps,
   },
@@ -83,6 +86,7 @@ export const assets = sqliteTable(
     sequencesJson: text('sequences_json').notNull(),
     approvalState: text('approval_state').notNull().default('Pending'),
     lockState: text('lock_state').notNull().default('Unlocked'),
+    lifecycleStatus: text('lifecycle_status').notNull().default('Active'),
     currentVersion: integer('current_version').notNull().default(1),
     ...timestamps,
   },
@@ -118,6 +122,9 @@ export const assetReferences = sqliteTable(
     contentType: text('content_type').notNull(),
     byteSize: integer('byte_size').notNull(),
     role: text('role').notNull().default('Unassigned reference'),
+    referenceRolesJson: text('reference_roles_json').notNull().default('[]'),
+    roleOverridesJson: text('role_overrides_json').notNull().default('[]'),
+    excludedTraitsJson: text('excluded_traits_json').notNull().default('[]'),
     createdAt: text('created_at').notNull(),
   },
   (table) => [index('idx_asset_references_project').on(table.projectId)],
@@ -207,6 +214,12 @@ export const generationJobs = sqliteTable(
     targetId: text('target_id').notNull(),
     provider: text('provider').notNull(),
     model: text('model').notNull(),
+    modelVersion: text('model_version').notNull().default('unconfigured'),
+    capabilityRevision: text('capability_revision').notNull().default('unverified-1'),
+    idempotencyKey: text('idempotency_key').notNull().default(''),
+    queuePosition: integer('queue_position').notNull().default(0),
+    submissionToken: text('submission_token'),
+    providerRequestId: text('provider_request_id'),
     promptVersion: integer('prompt_version').notNull(),
     referenceFilesJson: text('reference_files_json').notNull(),
     status: text('status').notNull(),
@@ -215,7 +228,10 @@ export const generationJobs = sqliteTable(
     startedAt: text('started_at').notNull(),
     updatedAt: text('updated_at').notNull(),
   },
-  (table) => [index('idx_generation_jobs_project_status').on(table.projectId, table.status)],
+  (table) => [
+    index('idx_generation_jobs_project_status').on(table.projectId, table.status),
+    index('idx_generation_jobs_project_idempotency').on(table.projectId, table.idempotencyKey),
+  ],
 );
 
 export const generationResults = sqliteTable('generation_results', {
@@ -468,6 +484,21 @@ export const fileIntegrity = sqliteTable(
   (table) => [uniqueIndex('idx_file_integrity_project_fingerprint').on(table.projectId, table.fingerprintSha256)],
 );
 
+export const mediaChecksums = sqliteTable(
+  'media_checksums',
+  {
+    id: text('id').primaryKey(),
+    projectId: text('project_id').notNull().references(() => projects.id, { onDelete: 'cascade' }),
+    mediaKey: text('media_key').notNull(),
+    mediaKind: text('media_kind').notNull(),
+    fingerprintSha256: text('fingerprint_sha256').notNull(),
+    byteSize: integer('byte_size').notNull(),
+    integrityStatus: text('integrity_status').notNull(),
+    verifiedAt: text('verified_at').notNull(),
+  },
+  (table) => [uniqueIndex('idx_media_checksums_project_key').on(table.projectId, table.mediaKey)],
+);
+
 export const projectImports = sqliteTable(
   'project_imports',
   {
@@ -520,4 +551,88 @@ export const providerCapabilityVersions = sqliteTable(
     refreshedAt: text('refreshed_at').notNull(),
   },
   (table) => [uniqueIndex('idx_provider_capability_project_profile_revision').on(table.projectId, table.profileId, table.revision)],
+);
+
+export const projectControlState = sqliteTable('project_control_state', {
+  projectId: text('project_id').primaryKey().references(() => projects.id, { onDelete: 'cascade' }),
+  dataSchemaVersion: integer('data_schema_version').notNull(),
+  lifecycleState: text('lifecycle_state').notNull(),
+  controlJson: text('control_json').notNull(),
+  updatedAt: text('updated_at').notNull(),
+});
+
+export const generationIdempotency = sqliteTable(
+  'generation_idempotency',
+  {
+    id: text('id').primaryKey(),
+    projectId: text('project_id').notNull().references(() => projects.id, { onDelete: 'cascade' }),
+    idempotencyKey: text('idempotency_key').notNull(),
+    jobId: text('job_id').notNull().references(() => generationJobs.id, { onDelete: 'cascade' }),
+    providerRequestId: text('provider_request_id'),
+    status: text('status').notNull(),
+    createdAt: text('created_at').notNull(),
+    updatedAt: text('updated_at').notNull(),
+  },
+  (table) => [uniqueIndex('idx_generation_idempotency_project_key').on(table.projectId, table.idempotencyKey)],
+);
+
+export const decisionPins = sqliteTable(
+  'decision_pins',
+  {
+    id: text('id').primaryKey(),
+    projectId: text('project_id').notNull().references(() => projects.id, { onDelete: 'cascade' }),
+    targetType: text('target_type').notNull(),
+    targetId: text('target_id').notNull(),
+    fieldName: text('field_name').notNull(),
+    valueJson: text('value_json').notNull(),
+    status: text('status').notNull(),
+    createdAt: text('created_at').notNull(),
+    releasedAt: text('released_at'),
+  },
+  (table) => [index('idx_decision_pins_project_target').on(table.projectId, table.targetType, table.targetId)],
+);
+
+export const storageCleanupLog = sqliteTable(
+  'storage_cleanup_log',
+  {
+    id: text('id').primaryKey(),
+    projectId: text('project_id').notNull().references(() => projects.id, { onDelete: 'cascade' }),
+    removedJson: text('removed_json').notNull(),
+    protectedOriginalCount: integer('protected_original_count').notNull(),
+    protectedApprovedCount: integer('protected_approved_count').notNull(),
+    bytesBefore: integer('bytes_before').notNull(),
+    bytesAfter: integer('bytes_after').notNull(),
+    createdAt: text('created_at').notNull(),
+  },
+  (table) => [index('idx_storage_cleanup_project_created').on(table.projectId, table.createdAt)],
+);
+
+export const importMappingReviews = sqliteTable(
+  'import_mapping_reviews',
+  {
+    id: text('id').primaryKey(),
+    projectId: text('project_id').references(() => projects.id, { onDelete: 'cascade' }),
+    sourceName: text('source_name').notNull(),
+    fingerprintSha256: text('fingerprint_sha256').notNull(),
+    mappingJson: text('mapping_json').notNull(),
+    status: text('status').notNull(),
+    createdAt: text('created_at').notNull(),
+    approvedAt: text('approved_at'),
+  },
+  (table) => [uniqueIndex('idx_import_mapping_fingerprint').on(table.fingerprintSha256)],
+);
+
+export const archiveVerifications = sqliteTable(
+  'archive_verifications',
+  {
+    id: text('id').primaryKey(),
+    projectId: text('project_id').notNull().references(() => projects.id, { onDelete: 'cascade' }),
+    kind: text('kind').notNull(),
+    expectedFileCount: integer('expected_file_count').notNull(),
+    verifiedFileCount: integer('verified_file_count').notNull(),
+    status: text('status').notNull(),
+    manifestHash: text('manifest_hash').notNull(),
+    verifiedAt: text('verified_at').notNull(),
+  },
+  (table) => [index('idx_archive_verifications_project').on(table.projectId, table.verifiedAt)],
 );

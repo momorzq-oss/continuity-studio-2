@@ -29,6 +29,20 @@
       "when": 1788018033893,
       "tag": "0003_left_monster_badoon",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "6",
+      "when": 1788020031329,
+      "tag": "0004_lethal_ultimatum",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "6",
+      "when": 1788020525061,
+      "tag": "0005_wide_beyonder",
+      "breakpoints": true
     }
   ]
 }

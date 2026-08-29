@@ -1,4 +1,5 @@
 import { ensureSchema, getRuntimeEnv } from '@/db/runtime';
+import { refreshProductionSystem } from '@/lib/production-system';
 import { assetProductionReference, normalizeProject, nowIso, type StudioMessage, type StudioProject } from '@/lib/studio';
 
 export const runtime = 'edge';
@@ -125,6 +126,7 @@ export async function POST(request: Request) {
         coverageAsset = character;
       }
     }
+    refreshProductionSystem(project);
 
     const assistant: StudioMessage = {
       id: `message_${crypto.randomUUID()}`,
@@ -148,14 +150,22 @@ export async function POST(request: Request) {
       DB.prepare('INSERT INTO project_recovery_snapshots (id, project_id, reason, state_json, created_at) VALUES (?, ?, ?, ?, ?)')
         .bind(snapshotId, projectId, summary, row.state_json, createdAt),
       DB.prepare(`INSERT INTO asset_references (
-        id, project_id, asset_id, original_name, media_key, content_type, byte_size, role, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`).bind(
-        id, projectId, assetId, file.name, mediaKey, attachment.contentType, file.size, role, createdAt,
+        id, project_id, asset_id, original_name, media_key, content_type, byte_size, role,
+        reference_roles_json, role_overrides_json, excluded_traits_json, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).bind(
+        id, projectId, assetId, file.name, mediaKey, attachment.contentType, file.size, role,
+        JSON.stringify(attachment.referenceRoles), JSON.stringify(attachment.roleOverrides ?? []), JSON.stringify(attachment.excludedTraits ?? []), createdAt,
       ),
       DB.prepare(`INSERT INTO file_integrity
         (reference_id, project_id, fingerprint_sha256, preview_media_key, preview_kind, integrity_status, verified_at)
         VALUES (?, ?, ?, ?, ?, ?, ?)`)
         .bind(id, projectId, fingerprintSha256, mediaKey, attachment.previewKind, 'Original', createdAt),
+      DB.prepare(`INSERT INTO media_checksums
+        (id, project_id, media_key, media_kind, fingerprint_sha256, byte_size, integrity_status, verified_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).bind(
+        `checksum_${crypto.randomUUID()}`, projectId, mediaKey, 'original-reference', fingerprintSha256,
+        attachment.byteSize, 'Verified', createdAt,
+      ),
       DB.prepare('UPDATE projects SET state_json = ?, updated_at = ? WHERE id = ?')
         .bind(JSON.stringify(project), createdAt, projectId),
       DB.prepare('UPDATE project_transactions SET revision = ?, last_transaction_id = ?, updated_at = ? WHERE project_id = ?')
@@ -197,15 +207,32 @@ export async function GET(request: Request) {
     const referenceId = url.searchParams.get('referenceId');
     if (!projectId || !referenceId) return Response.json({ error: 'Project and reference are required.' }, { status: 400 });
     const { DB, FILES } = getRuntimeEnv();
-    const row = await DB.prepare('SELECT media_key, content_type, original_name FROM asset_references WHERE id = ? AND project_id = ?')
-      .bind(referenceId, projectId).first<{ media_key: string; content_type: string; original_name: string }>();
+    const row = await DB.prepare(`SELECT ar.media_key, ar.content_type, ar.original_name, fi.fingerprint_sha256
+      FROM asset_references ar LEFT JOIN file_integrity fi ON fi.reference_id = ar.id
+      WHERE ar.id = ? AND ar.project_id = ?`)
+      .bind(referenceId, projectId).first<{ media_key: string; content_type: string; original_name: string; fingerprint_sha256: string | null }>();
     if (!row) return Response.json({ error: 'Reference not found.' }, { status: 404 });
     const object = await FILES.get(row.media_key);
     if (!object) {
       await DB.prepare("UPDATE file_integrity SET integrity_status = 'Missing', verified_at = ? WHERE reference_id = ?").bind(nowIso(), referenceId).run();
       return Response.json({ error: 'The original reference file is missing from project storage.' }, { status: 404 });
     }
-    return new Response(object.body, {
+    const bytes = await object.arrayBuffer();
+    const actualFingerprint = toHex(await crypto.subtle.digest('SHA-256', bytes.slice(0)));
+    if (row.fingerprint_sha256 && actualFingerprint !== row.fingerprint_sha256) {
+      const verifiedAt = nowIso();
+      await DB.batch([
+        DB.prepare("UPDATE file_integrity SET integrity_status = 'Corrupt', verified_at = ? WHERE reference_id = ?").bind(verifiedAt, referenceId),
+        DB.prepare("UPDATE media_checksums SET integrity_status = 'Corrupt', verified_at = ? WHERE project_id = ? AND media_key = ?").bind(verifiedAt, projectId, row.media_key),
+      ]);
+      return Response.json({ error: 'The stored media checksum does not match its original fingerprint. The file was blocked as corrupt.' }, { status: 409 });
+    }
+    const verifiedAt = nowIso();
+    await DB.batch([
+      DB.prepare("UPDATE file_integrity SET integrity_status = 'Verified', verified_at = ? WHERE reference_id = ?").bind(verifiedAt, referenceId),
+      DB.prepare("UPDATE media_checksums SET integrity_status = 'Verified', verified_at = ? WHERE project_id = ? AND media_key = ?").bind(verifiedAt, projectId, row.media_key),
+    ]);
+    return new Response(bytes, {
       headers: {
         'Content-Type': object.httpMetadata?.contentType || row.content_type || 'application/octet-stream',
         'Content-Disposition': `inline; filename="${cleanName(row.original_name)}"`,

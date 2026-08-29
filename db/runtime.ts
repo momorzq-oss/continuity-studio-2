@@ -18,6 +18,9 @@ const schemaStatements = [
     export_status TEXT NOT NULL DEFAULT 'Not exported',
     pinned INTEGER NOT NULL DEFAULT 0,
     archived INTEGER NOT NULL DEFAULT 0,
+    data_schema_version INTEGER NOT NULL DEFAULT 4,
+    lifecycle_state TEXT NOT NULL DEFAULT 'Story Draft',
+    export_identity TEXT NOT NULL DEFAULT '',
     state_json TEXT NOT NULL,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
@@ -61,6 +64,7 @@ const schemaStatements = [
     sequences_json TEXT NOT NULL,
     approval_state TEXT NOT NULL DEFAULT 'Pending',
     lock_state TEXT NOT NULL DEFAULT 'Unlocked',
+    lifecycle_status TEXT NOT NULL DEFAULT 'Active',
     current_version INTEGER NOT NULL DEFAULT 1,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
@@ -87,6 +91,9 @@ const schemaStatements = [
     content_type TEXT NOT NULL,
     byte_size INTEGER NOT NULL,
     role TEXT NOT NULL DEFAULT 'Unassigned reference',
+    reference_roles_json TEXT NOT NULL DEFAULT '[]',
+    role_overrides_json TEXT NOT NULL DEFAULT '[]',
+    excluded_traits_json TEXT NOT NULL DEFAULT '[]',
     created_at TEXT NOT NULL
   )`,
   `CREATE INDEX IF NOT EXISTS idx_asset_references_project ON asset_references(project_id)`,
@@ -151,6 +158,12 @@ const schemaStatements = [
     target_id TEXT NOT NULL,
     provider TEXT NOT NULL,
     model TEXT NOT NULL,
+    model_version TEXT NOT NULL DEFAULT 'unconfigured',
+    capability_revision TEXT NOT NULL DEFAULT 'unverified-1',
+    idempotency_key TEXT NOT NULL DEFAULT '',
+    queue_position INTEGER NOT NULL DEFAULT 0,
+    submission_token TEXT,
+    provider_request_id TEXT,
     prompt_version INTEGER NOT NULL,
     reference_files_json TEXT NOT NULL,
     status TEXT NOT NULL,
@@ -351,6 +364,17 @@ const schemaStatements = [
     created_at TEXT NOT NULL
   )`,
   `CREATE INDEX IF NOT EXISTS idx_project_imports_project_created ON project_imports(project_id, created_at)`,
+  `CREATE TABLE IF NOT EXISTS media_checksums (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    media_key TEXT NOT NULL,
+    media_kind TEXT NOT NULL,
+    fingerprint_sha256 TEXT NOT NULL,
+    byte_size INTEGER NOT NULL,
+    integrity_status TEXT NOT NULL,
+    verified_at TEXT NOT NULL,
+    UNIQUE(project_id, media_key)
+  )`,
   `CREATE TABLE IF NOT EXISTS reserved_numbers (
     id TEXT PRIMARY KEY,
     project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
@@ -379,12 +403,93 @@ const schemaStatements = [
     refreshed_at TEXT NOT NULL,
     UNIQUE(project_id, profile_id, revision)
   )`,
+  `CREATE TABLE IF NOT EXISTS project_control_state (
+    project_id TEXT PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,
+    data_schema_version INTEGER NOT NULL,
+    lifecycle_state TEXT NOT NULL,
+    control_json TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  )`,
+  `CREATE TABLE IF NOT EXISTS generation_idempotency (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    idempotency_key TEXT NOT NULL,
+    job_id TEXT NOT NULL REFERENCES generation_jobs(id) ON DELETE CASCADE,
+    provider_request_id TEXT,
+    status TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(project_id, idempotency_key)
+  )`,
+  `CREATE TABLE IF NOT EXISTS decision_pins (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    target_type TEXT NOT NULL,
+    target_id TEXT NOT NULL,
+    field_name TEXT NOT NULL,
+    value_json TEXT NOT NULL,
+    status TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    released_at TEXT
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_decision_pins_project_target ON decision_pins(project_id, target_type, target_id)`,
+  `CREATE TABLE IF NOT EXISTS storage_cleanup_log (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    removed_json TEXT NOT NULL,
+    protected_original_count INTEGER NOT NULL,
+    protected_approved_count INTEGER NOT NULL,
+    bytes_before INTEGER NOT NULL,
+    bytes_after INTEGER NOT NULL,
+    created_at TEXT NOT NULL
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_storage_cleanup_project_created ON storage_cleanup_log(project_id, created_at)`,
+  `CREATE TABLE IF NOT EXISTS import_mapping_reviews (
+    id TEXT PRIMARY KEY,
+    project_id TEXT REFERENCES projects(id) ON DELETE CASCADE,
+    source_name TEXT NOT NULL,
+    fingerprint_sha256 TEXT NOT NULL UNIQUE,
+    mapping_json TEXT NOT NULL,
+    status TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    approved_at TEXT
+  )`,
+  `CREATE TABLE IF NOT EXISTS archive_verifications (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    kind TEXT NOT NULL,
+    expected_file_count INTEGER NOT NULL,
+    verified_file_count INTEGER NOT NULL,
+    status TEXT NOT NULL,
+    manifest_hash TEXT NOT NULL,
+    verified_at TEXT NOT NULL
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_archive_verifications_project ON archive_verifications(project_id, verified_at)`,
   `PRAGMA optimize`,
 ] as const;
 
 export async function ensureSchema() {
   if (initialized) return;
   await env.DB.batch(schemaStatements.map((statement) => env.DB.prepare(statement)));
+  const ensureColumn = async (table: string, column: string, definition: string) => {
+    const columns = await env.DB.prepare(`PRAGMA table_info(${table})`).all<{ name: string }>();
+    if (!columns.results.some((item) => item.name === column)) await env.DB.prepare(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`).run();
+  };
+  await ensureColumn('projects', 'data_schema_version', 'INTEGER NOT NULL DEFAULT 4');
+  await ensureColumn('projects', 'lifecycle_state', "TEXT NOT NULL DEFAULT 'Story Draft'");
+  await ensureColumn('projects', 'export_identity', "TEXT NOT NULL DEFAULT ''");
+  await ensureColumn('assets', 'lifecycle_status', "TEXT NOT NULL DEFAULT 'Active'");
+  await ensureColumn('asset_references', 'reference_roles_json', "TEXT NOT NULL DEFAULT '[]'");
+  await ensureColumn('asset_references', 'role_overrides_json', "TEXT NOT NULL DEFAULT '[]'");
+  await ensureColumn('asset_references', 'excluded_traits_json', "TEXT NOT NULL DEFAULT '[]'");
+  await ensureColumn('generation_jobs', 'model_version', "TEXT NOT NULL DEFAULT 'unconfigured'");
+  await ensureColumn('generation_jobs', 'capability_revision', "TEXT NOT NULL DEFAULT 'unverified-1'");
+  await ensureColumn('generation_jobs', 'idempotency_key', "TEXT NOT NULL DEFAULT ''");
+  await ensureColumn('generation_jobs', 'queue_position', 'INTEGER NOT NULL DEFAULT 0');
+  await ensureColumn('generation_jobs', 'submission_token', 'TEXT');
+  await ensureColumn('generation_jobs', 'provider_request_id', 'TEXT');
+  await env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_generation_jobs_project_idempotency ON generation_jobs(project_id, idempotency_key)').run();
+  await env.DB.prepare('PRAGMA optimize').run();
   initialized = true;
 }
 

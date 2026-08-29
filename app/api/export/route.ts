@@ -1,6 +1,7 @@
-import { strToU8, zipSync } from 'fflate';
+import { strToU8 } from 'fflate';
 
 import { ensureSchema, getRuntimeEnv } from '@/db/runtime';
+import { createVerifiedArchive } from '@/lib/archive-verification';
 import { collectFlatGeneratedAssets, flatAssetManifest } from '@/lib/flat-asset-export';
 import { normalizeProject, nowIso, type StudioProject } from '@/lib/studio';
 
@@ -12,6 +13,13 @@ function safeName(value: string) {
 
 function text(value: unknown) {
   return strToU8(typeof value === 'string' ? value : JSON.stringify(value, null, 2));
+}
+
+async function sha256(bytes: Uint8Array) {
+  const copy = new Uint8Array(bytes.byteLength);
+  copy.set(bytes);
+  const digest = await crypto.subtle.digest('SHA-256', copy.buffer);
+  return [...new Uint8Array(digest)].map((value) => value.toString(16).padStart(2, '0')).join('');
 }
 
 export async function GET(request: Request) {
@@ -45,12 +53,21 @@ export async function GET(request: Request) {
     const recoverySnapshots = await DB.prepare(
       'SELECT id, reason, state_json, created_at FROM project_recovery_snapshots WHERE project_id = ? ORDER BY created_at ASC',
     ).bind(projectId).all<{ id: string; reason: string; state_json: string; created_at: string }>();
-    const root = safeName(project.title);
+    const root = project.production.control.exportIdentity?.collisionSafeSlug ?? `${safeName(project.title)}_${project.id.replace(/[^a-zA-Z0-9]/g, '').slice(-8).toUpperCase()}`;
     const missingStoredFiles: string[] = [];
-    for (const reference of references.results) if (!(await FILES.head(reference.media_key))) missingStoredFiles.push(`${reference.id} (${reference.original_name})`);
+    const corruptStoredFiles: string[] = [];
+    const referenceBytes = new Map<string, Uint8Array>();
+    for (const reference of references.results) {
+      const object = await FILES.get(reference.media_key);
+      if (!object) { missingStoredFiles.push(`${reference.id} (${reference.original_name})`); continue; }
+      const bytes = new Uint8Array(await object.arrayBuffer());
+      referenceBytes.set(reference.id, bytes);
+      if (reference.fingerprint_sha256 && await sha256(bytes) !== reference.fingerprint_sha256) corruptStoredFiles.push(`${reference.id} (${reference.original_name})`);
+    }
     project.production.control.integrityAudit.checks = [
-      ...project.production.control.integrityAudit.checks.filter((check) => check.id !== 'stored-files'),
+      ...project.production.control.integrityAudit.checks.filter((check) => !['stored-files', 'stored-checksums'].includes(check.id)),
       { id: 'stored-files', status: missingStoredFiles.length ? 'Failed' : 'Passed', label: 'Original stored files', detail: missingStoredFiles.length ? `Missing: ${missingStoredFiles.join(', ')}` : `${references.results.length} referenced original file(s) verified in project storage.` },
+      { id: 'stored-checksums', status: corruptStoredFiles.length ? 'Failed' : 'Passed', label: 'Media checksum verification', detail: corruptStoredFiles.length ? `Corrupt or replaced: ${corruptStoredFiles.join(', ')}` : `${referenceBytes.size} stored original checksum(s) match.` },
     ];
     project.production.control.integrityAudit.missing = project.production.control.integrityAudit.checks.filter((check) => check.status !== 'Passed').map((check) => `${check.label}: ${check.detail}`);
     project.production.control.integrityAudit.status = project.production.control.integrityAudit.missing.length ? 'Failed' : 'Passed';
@@ -157,10 +174,8 @@ export async function GET(request: Request) {
       files[`${root}/locations/${location.id}_V${String(location.version).padStart(2, '0')}.json`] = text(location);
     }
     for (const reference of references.results) {
-      const object = await FILES.get(reference.media_key);
-      if (object) {
-        files[`${root}/source_references/${reference.id}_${safeName(reference.original_name)}`] = new Uint8Array(await object.arrayBuffer());
-      }
+      const bytes = referenceBytes.get(reference.id);
+      if (bytes) files[`${root}/source_references/${reference.id}_${safeName(reference.original_name)}`] = bytes;
     }
     for (const snapshot of recoverySnapshots.results) {
       files[`${root}/recovery/${snapshot.created_at.replace(/[:.]/g, '-')}_${snapshot.id}.json`] = text({
@@ -170,7 +185,8 @@ export async function GET(request: Request) {
         state: JSON.parse(snapshot.state_json),
       });
     }
-    const zipped = zipSync(files, { level: 6 });
+    const { zipped, verification } = await createVerifiedArchive(files, `${root}/reports/ARCHIVE_MANIFEST.json`);
+    if (verification.status !== 'Passed') return Response.json({ error: `Final archive verification failed: ${verification.errors.join(' ')}` }, { status: 500 });
     const createdAt = nowIso();
     const exportId = `export_${crypto.randomUUID()}`;
     const filename = `${root}_FULL_PROJECT.zip`;
@@ -184,6 +200,8 @@ export async function GET(request: Request) {
     const snapshotId = crypto.randomUUID();
     const changeId = `change_${crypto.randomUUID()}`;
     const summary = `Exported full project archive ${filename}; integrity ${project.production.control.integrityAudit.status}.`;
+    const archiveVerification = { id: `archive_verification_${crypto.randomUUID()}`, kind: 'full-project' as const, expectedFileCount: verification.expectedFileCount, verifiedFileCount: verification.verifiedFileCount, status: verification.status, manifestHash: verification.manifestHash, verifiedAt: createdAt };
+    project.production.control.archiveVerifications.push(archiveVerification);
     project.production.control.changeLog.push({ id: changeId, revision: project.storageRevision, scope: 'export', summary, createdAt });
     await DB.batch([
       DB.prepare(`INSERT INTO transaction_guards (id, project_id, revision_ok, created_at)
@@ -199,12 +217,16 @@ export async function GET(request: Request) {
         .bind(project.storageRevision, transactionId, createdAt, projectId),
       DB.prepare('INSERT INTO production_change_log (id, project_id, revision, scope, summary, before_snapshot_id, after_state_hash, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
         .bind(changeId, projectId, project.storageRevision, 'export', summary, snapshotId, `${JSON.stringify(project).length.toString(16)}-${createdAt}`, createdAt),
+      DB.prepare('INSERT INTO archive_verifications (id, project_id, kind, expected_file_count, verified_file_count, status, manifest_hash, verified_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+        .bind(archiveVerification.id, projectId, archiveVerification.kind, archiveVerification.expectedFileCount, archiveVerification.verifiedFileCount, archiveVerification.status, archiveVerification.manifestHash, archiveVerification.verifiedAt),
     ]);
     return new Response(zipped, {
       headers: {
         'Content-Type': 'application/zip',
         'Content-Disposition': `attachment; filename="${filename}"`,
         'Cache-Control': 'no-store',
+        'X-Archive-Verification': verification.status,
+        'X-Archive-Manifest-SHA256': verification.manifestHash,
       },
     });
   } catch (error) {

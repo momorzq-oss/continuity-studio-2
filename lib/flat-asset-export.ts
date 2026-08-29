@@ -6,6 +6,28 @@ interface GeneratedRow {
   created_at: string;
 }
 
+function toHex(bytes: ArrayBuffer) {
+  return [...new Uint8Array(bytes)].map((value) => value.toString(16).padStart(2, '0')).join('');
+}
+
+async function verifyStoredMedia(projectId: string, mediaKey: string, bytes: Uint8Array, DB: D1Database) {
+  const fingerprint = toHex(await crypto.subtle.digest('SHA-256', Uint8Array.from(bytes).buffer));
+  const known = await DB.prepare('SELECT fingerprint_sha256 FROM media_checksums WHERE project_id = ? AND media_key = ?')
+    .bind(projectId, mediaKey)
+    .first<{ fingerprint_sha256: string }>();
+  if (known && known.fingerprint_sha256 !== fingerprint) {
+    await DB.prepare("UPDATE media_checksums SET integrity_status = 'Corrupt', verified_at = ? WHERE project_id = ? AND media_key = ?")
+      .bind(new Date().toISOString(), projectId, mediaKey).run();
+    throw new Error(`Stored generated media failed checksum verification: ${mediaKey}`);
+  }
+  await DB.prepare(`INSERT INTO media_checksums
+    (id, project_id, media_key, media_kind, fingerprint_sha256, byte_size, integrity_status, verified_at)
+    VALUES (?, ?, ?, 'generated-asset', ?, ?, 'Verified', ?)
+    ON CONFLICT(project_id, media_key) DO UPDATE SET byte_size = excluded.byte_size,
+      integrity_status = 'Verified', verified_at = excluded.verified_at`)
+    .bind(`checksum_${crypto.randomUUID()}`, projectId, mediaKey, fingerprint, bytes.byteLength, new Date().toISOString()).run();
+}
+
 function matchesAsset(targetId: string, projectId: string, assetId: string) {
   return targetId === assetId || targetId === `${projectId}:${assetId}` || targetId.endsWith(`:${assetId}`);
 }
@@ -38,7 +60,9 @@ export async function collectFlatGeneratedAssets(
     if (!candidate) continue;
     const object = await FILES.get(candidate.media_key);
     if (!object) continue;
-    files[`${pathPrefix}${project.flatAssetFolder.folderName}/${asset.generatedFileName}`] = new Uint8Array(await object.arrayBuffer());
+    const bytes = new Uint8Array(await object.arrayBuffer());
+    await verifyStoredMedia(project.id, candidate.media_key, bytes, DB);
+    files[`${pathPrefix}${project.flatAssetFolder.folderName}/${asset.generatedFileName}`] = bytes;
     exportedAssetNumbers.push(asset.projectNumber);
   }
 

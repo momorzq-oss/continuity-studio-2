@@ -1,6 +1,5 @@
-import { zipSync } from 'fflate';
-
 import { ensureSchema, getRuntimeEnv } from '@/db/runtime';
+import { createVerifiedArchive } from '@/lib/archive-verification';
 import { collectFlatGeneratedAssets } from '@/lib/flat-asset-export';
 import { normalizeProject, type StudioProject } from '@/lib/studio';
 
@@ -23,13 +22,18 @@ export async function GET(request: Request) {
         error: 'No approved generated visual assets are available yet. Approve generated assets first; source references are not placed in the generated asset folder.',
       }, { status: 409 });
     }
-    const zipped = zipSync(flat.files, { level: 6 });
+    const { zipped, verification } = await createVerifiedArchive(flat.files, 'FLAT_ASSET_ARCHIVE_MANIFEST.json');
+    if (verification.status !== 'Passed') return Response.json({ error: `The flat asset archive failed final verification: ${verification.errors.join(' ')}` }, { status: 500 });
+    await DB.prepare('INSERT INTO archive_verifications (id, project_id, kind, expected_file_count, verified_file_count, status, manifest_hash, verified_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+      .bind(`archive_verification_${crypto.randomUUID()}`, project.id, 'flat-assets', verification.expectedFileCount, verification.verifiedFileCount, verification.status, verification.manifestHash, new Date().toISOString()).run();
     const filename = `${project.flatAssetFolder.folderName}.zip`;
     return new Response(zipped, {
       headers: {
         'Content-Type': 'application/zip',
         'Content-Disposition': `attachment; filename="${filename}"`,
         'Cache-Control': 'no-store',
+        'X-Archive-Verification': verification.status,
+        'X-Archive-Manifest-SHA256': verification.manifestHash,
       },
     });
   } catch (error) {
