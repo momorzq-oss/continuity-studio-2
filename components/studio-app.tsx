@@ -1,0 +1,654 @@
+'use client';
+
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent } from 'react';
+import {
+  Archive,
+  ArrowLeft,
+  ArrowUp,
+  BookOpen,
+  Check,
+  ChevronDown,
+  Clapperboard,
+  Clock3,
+  Copy,
+  Download,
+  FileArchive,
+  FileImage,
+  Film,
+  FolderClock,
+  Image as ImageIcon,
+  Library,
+  LoaderCircle,
+  Lock,
+  Menu,
+  MessageSquareText,
+  Mic,
+  Moon,
+  MoreHorizontal,
+  Paperclip,
+  Pin,
+  Play,
+  Plus,
+  RefreshCw,
+  Search,
+  Settings,
+  Sparkles,
+  Sun,
+  Upload,
+  X,
+} from 'lucide-react';
+
+import { Badge } from '@/components/ui/badge';
+import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { Progress } from '@/components/ui/progress';
+import { Switch } from '@/components/ui/switch';
+import { cn } from '@/lib/utils';
+import type { ProjectSummary, StudioAsset, StudioMessage, StudioProject, StudioSequence } from '@/lib/studio';
+
+type View = 'chat' | 'projects' | 'assets' | 'exports' | 'settings';
+
+const primaryNavigation = [
+  { id: 'projects' as const, label: 'Projects', icon: FolderClock },
+  { id: 'assets' as const, label: 'Asset Library', icon: Library },
+  { id: 'exports' as const, label: 'Exports', icon: Archive },
+];
+
+const assetFilters = ['All', 'Characters', 'Creatures', 'Animals', 'Locations', 'Interiors', 'Vehicles', 'Props', 'Weapons', 'Costumes', 'Approved', 'Pending', 'Needs Review'];
+
+function relativeTime(value: string) {
+  const delta = Date.now() - new Date(value).getTime();
+  if (delta < 60_000) return 'Just now';
+  if (delta < 3_600_000) return `${Math.floor(delta / 60_000)}m ago`;
+  if (delta < 86_400_000) return `${Math.floor(delta / 3_600_000)}h ago`;
+  return new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric' }).format(new Date(value));
+}
+
+function durationLabel(seconds: number) {
+  const minutes = Math.floor(seconds / 60);
+  const remainder = seconds % 60;
+  return `${minutes}:${String(remainder).padStart(2, '0')}`;
+}
+
+function assetTone(category: string) {
+  const tones: Record<string, string> = {
+    Characters: 'from-amber-400/22 to-orange-950/10 text-amber-200',
+    Creatures: 'from-violet-400/20 to-fuchsia-950/10 text-violet-200',
+    Animals: 'from-emerald-400/18 to-emerald-950/10 text-emerald-200',
+    Locations: 'from-sky-400/18 to-sky-950/10 text-sky-200',
+    Interiors: 'from-cyan-400/18 to-cyan-950/10 text-cyan-200',
+    Vehicles: 'from-blue-400/18 to-blue-950/10 text-blue-200',
+    Props: 'from-rose-400/16 to-rose-950/10 text-rose-200',
+    Weapons: 'from-red-400/18 to-red-950/10 text-red-200',
+    Costumes: 'from-fuchsia-400/16 to-fuchsia-950/10 text-fuchsia-200',
+  };
+  return tones[category] ?? 'from-zinc-400/16 to-zinc-950/10 text-zinc-200';
+}
+
+function statusClass(status: string) {
+  if (/approved|locked|passed|exported/i.test(status)) return 'border-emerald-400/20 bg-emerald-400/10 text-emerald-200';
+  if (/review|failed|blocked/i.test(status)) return 'border-rose-400/20 bg-rose-400/10 text-rose-200';
+  if (/ready|generated/i.test(status)) return 'border-sky-400/20 bg-sky-400/10 text-sky-200';
+  return 'border-amber-400/20 bg-amber-400/10 text-amber-200';
+}
+
+function EmptyProjectMark({ compact = false }: { compact?: boolean }) {
+  return (
+    <div className={cn('icon-stage grid place-items-center rounded-2xl border', compact ? 'size-11' : 'size-14')}>
+      <Film className={compact ? 'size-5' : 'size-6'} strokeWidth={1.45} />
+    </div>
+  );
+}
+
+function ProjectStatus({ project }: { project: StudioProject }) {
+  const [open, setOpen] = useState(false);
+  const approvedAssets = project.assets.filter((asset) => ['Approved', 'Locked'].includes(asset.approvalState)).length;
+  const approvedSequences = project.sequences.filter((sequence) => sequence.status === 'Approved').length;
+  return (
+    <div className="relative">
+      <button
+        type="button"
+        onClick={() => setOpen((value) => !value)}
+        className="flex max-w-[min(72vw,620px)] items-center gap-2 rounded-full border border-border bg-card/70 px-3 py-1.5 text-left text-xs transition hover:bg-card"
+        aria-expanded={open}
+      >
+        <span className="size-1.5 shrink-0 rounded-full bg-[var(--ready)] shadow-[0_0_10px_var(--ready)]" />
+        <span className="truncate font-medium">{project.title}</span>
+        <span className="hidden text-muted-foreground sm:inline">· {project.stage}</span>
+        <ChevronDown className={cn('size-3.5 shrink-0 text-muted-foreground transition', open && 'rotate-180')} />
+      </button>
+      {open && (
+        <div className="absolute left-0 top-10 z-40 w-[min(86vw,430px)] rounded-2xl border border-border bg-popover p-4 shadow-2xl">
+          <div className="flex items-start justify-between gap-4">
+            <div>
+              <p className="font-medium">{project.title}</p>
+              <p className="mt-1 text-xs text-muted-foreground">{durationLabel(project.durationSeconds)} · {project.sequenceCount} sequences · {project.genre}</p>
+            </div>
+            <Badge variant="outline" className={statusClass(project.continuity.status)}>{project.continuity.status}</Badge>
+          </div>
+          <div className="mt-4 grid grid-cols-2 gap-x-5 gap-y-3 text-xs">
+            <StatusLine label="Story" value={project.story.status} />
+            <StatusLine label="Film Bible" value={project.filmBible.status} />
+            <StatusLine label="Assets" value={`${approvedAssets}/${project.assets.length}`} />
+            <StatusLine label="Sequences" value={`${approvedSequences}/${project.sequenceCount}`} />
+            <StatusLine label="Current" value={`Sequence ${project.currentSequence}`} />
+            <StatusLine label="Export" value={project.exportStatus} />
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function StatusLine({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="flex items-center justify-between gap-3 border-b border-border/60 pb-2">
+      <span className="text-muted-foreground">{label}</span>
+      <span className="truncate font-medium">{value}</span>
+    </div>
+  );
+}
+
+function StoryCard({ project, onAction }: { project: StudioProject; onAction: (message: string) => void }) {
+  return (
+    <section className="mt-4 overflow-hidden rounded-2xl border border-border bg-card/65">
+      <div className="flex items-center justify-between border-b border-border/70 px-4 py-3">
+        <div className="flex items-center gap-2.5">
+          <BookOpen className="size-4 text-amber-300" />
+          <span className="text-sm font-medium">Story · v{project.story.version}</span>
+        </div>
+        <Badge variant="outline" className={statusClass(project.story.status)}>{project.story.status}</Badge>
+      </div>
+      <div className="space-y-4 p-4 text-sm">
+        <div>
+          <p className="mb-1 text-[10px] font-semibold uppercase tracking-[0.15em] text-muted-foreground">Logline</p>
+          <p className="leading-6 text-foreground/90">{project.story.logline}</p>
+        </div>
+        <div className="grid gap-3 sm:grid-cols-2">
+          <div className="rounded-xl bg-background/55 p-3">
+            <p className="text-[10px] font-semibold uppercase tracking-[0.14em] text-muted-foreground">Midpoint</p>
+            <p className="mt-1.5 text-xs leading-5 text-foreground/80">{project.story.midpoint}</p>
+          </div>
+          <div className="rounded-xl bg-background/55 p-3">
+            <p className="text-[10px] font-semibold uppercase tracking-[0.14em] text-muted-foreground">Ending</p>
+            <p className="mt-1.5 text-xs leading-5 text-foreground/80">{project.story.ending}</p>
+          </div>
+        </div>
+      </div>
+      <div className="flex flex-wrap gap-2 border-t border-border/70 bg-background/35 px-4 py-3">
+        {project.story.status !== 'Approved' && <Button size="sm" onClick={() => onAction('Approve the story')}><Check />Approve story</Button>}
+        <Button size="sm" variant="outline" onClick={() => onAction('Make it scarier')}>Make scarier</Button>
+        <Button size="sm" variant="ghost" onClick={() => onAction('Continue')}>Continue</Button>
+      </div>
+    </section>
+  );
+}
+
+function BibleCard({ project, onAction }: { project: StudioProject; onAction: (message: string) => void }) {
+  return (
+    <section className="mt-4 rounded-2xl border border-border bg-card/65 p-4">
+      <div className="flex items-center justify-between gap-3">
+        <div className="flex items-center gap-2.5"><Clapperboard className="size-4 text-amber-300" /><span className="text-sm font-medium">Film Bible · v{project.filmBible.version}</span></div>
+        <Badge variant="outline" className={statusClass(project.filmBible.status)}>{project.filmBible.status}</Badge>
+      </div>
+      <div className="mt-4 grid gap-4 sm:grid-cols-2">
+        <RuleGroup title="Visual direction" rules={[project.visualStyle, project.cameraStyle, project.lightingDirection]} />
+        <RuleGroup title="Continuity rules" rules={project.filmBible.continuityRules} />
+      </div>
+      <div className="mt-4 flex flex-wrap gap-2 border-t border-border/70 pt-3">
+        {project.filmBible.status !== 'Approved' && <Button size="sm" onClick={() => onAction('Approve the Film Bible')}><Check />Approve Film Bible</Button>}
+        <Button size="sm" variant="outline" onClick={() => onAction('Change the entire movie to night only')}>Night only</Button>
+      </div>
+    </section>
+  );
+}
+
+function RuleGroup({ title, rules }: { title: string; rules: string[] }) {
+  return (
+    <div>
+      <p className="text-[10px] font-semibold uppercase tracking-[0.14em] text-muted-foreground">{title}</p>
+      <ul className="mt-2 space-y-2 text-xs leading-5 text-foreground/80">
+        {rules.slice(0, 3).map((rule) => <li key={rule} className="flex gap-2"><span className="mt-2 size-1 shrink-0 rounded-full bg-amber-300/80" />{rule}</li>)}
+      </ul>
+    </div>
+  );
+}
+
+function AssetMiniCard({ asset, onAction }: { asset: StudioAsset; onAction: (message: string) => void }) {
+  return (
+    <article className="group overflow-hidden rounded-xl border border-border bg-background/55">
+      <div className={cn('flex h-20 items-end bg-gradient-to-br p-3', assetTone(asset.category))}>
+        <div className="flex size-8 items-center justify-center rounded-lg border border-current/15 bg-black/15"><ImageIcon className="size-4" /></div>
+      </div>
+      <div className="p-3">
+        <div className="flex items-start justify-between gap-2">
+          <div className="min-w-0"><p className="truncate text-xs font-medium">{asset.name}</p><p className="mt-0.5 font-mono text-[9px] text-muted-foreground">{asset.id} · V{String(asset.version).padStart(2, '0')}</p></div>
+          {asset.lockState === 'Locked' && <Lock className="size-3.5 shrink-0 text-emerald-300" />}
+        </div>
+        <Badge variant="outline" className={cn('mt-2 h-4 px-1.5 text-[9px]', statusClass(asset.approvalState))}>{asset.approvalState}</Badge>
+        <div className="mt-3 flex gap-1.5">
+          {asset.lockState !== 'Locked' && <Button size="xs" onClick={() => onAction(`Approve ${asset.id}`)}>Approve</Button>}
+          <Button size="xs" variant="ghost" onClick={() => onAction(`Regenerate ${asset.id}`)}><RefreshCw />Version</Button>
+        </div>
+      </div>
+    </article>
+  );
+}
+
+function AssetsCard({ project, ids, onAction, onOpenLibrary }: { project: StudioProject; ids?: string[]; onAction: (message: string) => void; onOpenLibrary: () => void }) {
+  const selected = ids?.length ? project.assets.filter((asset) => ids.includes(asset.id)) : project.assets;
+  return (
+    <section className="mt-4 rounded-2xl border border-border bg-card/65 p-4">
+      <div className="flex items-center justify-between gap-3">
+        <div><p className="text-sm font-medium">Asset manifest</p><p className="mt-1 text-xs text-muted-foreground">{project.assets.length} stable production assets</p></div>
+        <Button size="sm" variant="outline" onClick={onOpenLibrary}>View library</Button>
+      </div>
+      <div className="mt-4 grid grid-cols-2 gap-2.5 sm:grid-cols-3">
+        {selected.slice(0, 6).map((asset) => <AssetMiniCard key={asset.id} asset={asset} onAction={onAction} />)}
+      </div>
+      {project.assets.some((asset) => asset.lockState !== 'Locked') && (
+        <div className="mt-3 flex flex-wrap gap-2 border-t border-border/70 pt-3">
+          <Button size="sm" onClick={() => onAction('Approve all assets')}><Lock />Approve all</Button>
+          <Button size="sm" variant="ghost" onClick={() => onAction('Use my photo as the main character')}>Use my photo</Button>
+        </div>
+      )}
+    </section>
+  );
+}
+
+function SequenceCard({ sequence, onAction }: { sequence: StudioSequence; onAction: (message: string) => void }) {
+  const copyPrompt = async () => navigator.clipboard.writeText(sequence.prompt);
+  return (
+    <section className="mt-4 overflow-hidden rounded-2xl border border-border bg-card/65">
+      <div className="flex items-start justify-between gap-4 border-b border-border/70 p-4">
+        <div className="flex min-w-0 items-start gap-3">
+          <span className="grid size-9 shrink-0 place-items-center rounded-lg border border-amber-300/20 bg-amber-300/10 font-mono text-xs text-amber-200">{String(sequence.number).padStart(2, '0')}</span>
+          <div className="min-w-0"><p className="truncate text-sm font-medium">{sequence.title}</p><p className="mt-1 text-xs text-muted-foreground">{sequence.duration}s · {sequence.location}</p></div>
+        </div>
+        <Badge variant="outline" className={statusClass(sequence.status)}>{sequence.status}</Badge>
+      </div>
+      <div className="space-y-4 p-4">
+        <p className="text-sm leading-6 text-foreground/85">{sequence.purpose}</p>
+        <div className="grid gap-3 text-xs sm:grid-cols-2">
+          <StateBlock label="Opening state" value={sequence.openingState} />
+          <StateBlock label="Closing state" value={sequence.closingState} />
+        </div>
+        <div><p className="text-[10px] font-semibold uppercase tracking-[0.14em] text-muted-foreground">Exact reference assets</p><div className="mt-2 flex flex-wrap gap-1.5">{sequence.assetIds.map((id) => <Badge key={id} variant="outline" className="font-mono text-[9px]">{id}</Badge>)}</div></div>
+        <details className="rounded-xl border border-border bg-background/50 p-3">
+          <summary className="cursor-pointer text-xs font-medium">Seedance prompt</summary>
+          <pre className="mt-3 max-h-48 overflow-auto whitespace-pre-wrap font-mono text-[10px] leading-5 text-muted-foreground">{sequence.prompt}</pre>
+        </details>
+      </div>
+      <div className="flex flex-wrap gap-2 border-t border-border/70 bg-background/35 px-4 py-3">
+        <Button size="sm" onClick={() => onAction(`Generate Sequence ${sequence.number}`)}><Play />Generate</Button>
+        {sequence.status !== 'Approved' && <Button size="sm" variant="outline" onClick={() => onAction(`Approve Sequence ${sequence.number}`)}><Check />Approve</Button>}
+        <Button size="sm" variant="ghost" onClick={copyPrompt}><Copy />Copy prompt</Button>
+      </div>
+    </section>
+  );
+}
+
+function StateBlock({ label, value }: { label: string; value: string }) {
+  return <div className="rounded-xl bg-background/55 p-3"><p className="text-[10px] font-semibold uppercase tracking-[0.13em] text-muted-foreground">{label}</p><p className="mt-1.5 leading-5 text-foreground/80">{value}</p></div>;
+}
+
+function ExportCard({ project, onExport }: { project: StudioProject; onExport: () => void }) {
+  return (
+    <section className="mt-4 flex items-center justify-between gap-4 rounded-2xl border border-border bg-card/65 p-4">
+      <div className="flex min-w-0 items-center gap-3"><span className="grid size-10 shrink-0 place-items-center rounded-xl bg-amber-300/10 text-amber-200"><FileArchive className="size-5" /></span><div className="min-w-0"><p className="text-sm font-medium">Complete production package</p><p className="mt-1 truncate text-xs text-muted-foreground">Story, Bible, assets, sequences, prompts, continuity, media and metadata</p></div></div>
+      <Button size="sm" onClick={onExport}><Download />Download</Button>
+    </section>
+  );
+}
+
+function MessageItem({ item, project, onAction, onOpenLibrary, onExport }: { item: StudioMessage; project: StudioProject; onAction: (message: string) => void; onOpenLibrary: () => void; onExport: () => void }) {
+  if (item.role === 'user') {
+    return <div className="ml-auto max-w-[82%] rounded-[18px_18px_5px_18px] bg-secondary px-4 py-3 text-sm leading-6 text-secondary-foreground shadow-sm">{item.content}</div>;
+  }
+  const sequence = item.metadata?.sequenceNumber ? project.sequences.find((entry) => entry.number === item.metadata?.sequenceNumber) : undefined;
+  return (
+    <div className="max-w-full">
+      <div className="flex gap-3">
+        <span className="brand-mark mt-0.5 grid size-7 shrink-0 place-items-center rounded-lg"><Clapperboard className="size-3.5" /></span>
+        <div className="min-w-0 flex-1"><p className="max-w-2xl text-sm leading-6 text-foreground/90">{item.content}</p>
+          {item.metadata?.kind === 'story' && <StoryCard project={project} onAction={onAction} />}
+          {item.metadata?.kind === 'bible' && <BibleCard project={project} onAction={onAction} />}
+          {item.metadata?.kind === 'assets' && <AssetsCard project={project} ids={item.metadata.assetIds} onAction={onAction} onOpenLibrary={onOpenLibrary} />}
+          {item.metadata?.kind === 'sequence' && sequence && <SequenceCard sequence={sequence} onAction={onAction} />}
+          {item.metadata?.kind === 'export' && <ExportCard project={project} onExport={onExport} />}
+          {item.metadata?.kind === 'attachment' && <div className="mt-3 flex items-center gap-3 rounded-xl border border-border bg-card/55 p-3"><FileImage className="size-4 text-amber-200" /><span className="text-xs text-muted-foreground">Original reference stored in project memory</span></div>}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+export function StudioApp() {
+  const [projects, setProjects] = useState<ProjectSummary[]>([]);
+  const [project, setProject] = useState<StudioProject | null>(null);
+  const [messages, setMessages] = useState<StudioMessage[]>([]);
+  const [view, setView] = useState<View>('chat');
+  const [draft, setDraft] = useState('');
+  const [files, setFiles] = useState<File[]>([]);
+  const [booting, setBooting] = useState(true);
+  const [working, setWorking] = useState(false);
+  const [error, setError] = useState('');
+  const [mobileNav, setMobileNav] = useState(false);
+  const [search, setSearch] = useState('');
+  const [assetFilter, setAssetFilter] = useState('All');
+  const [lightMode, setLightMode] = useState(false);
+  const [dragging, setDragging] = useState(false);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const searchRef = useRef<HTMLInputElement>(null);
+  const messagesEndRef = useRef<HTMLDivElement>(null);
+
+  const loadProject = useCallback(async (projectId: string) => {
+    setBooting(true);
+    setError('');
+    try {
+      const response = await fetch(`/api/studio?projectId=${encodeURIComponent(projectId)}`, { cache: 'no-store' });
+      const data = await response.json() as { project?: StudioProject; messages?: StudioMessage[]; projects?: ProjectSummary[]; error?: string };
+      if (!response.ok || !data.project) throw new Error(data.error || 'Project could not be opened.');
+      setProject(data.project);
+      setMessages(data.messages ?? []);
+      setProjects(data.projects ?? []);
+      setView('chat');
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'Project could not be opened.');
+    } finally {
+      setBooting(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void (async () => {
+      try {
+        const response = await fetch('/api/studio', { cache: 'no-store' });
+        const data = await response.json() as { projects?: ProjectSummary[] };
+        const initial = data.projects ?? [];
+        setProjects(initial);
+        if (initial[0]) await loadProject(initial[0].id);
+      } catch {
+        setError('Project memory is temporarily unavailable.');
+      } finally {
+        setBooting(false);
+      }
+    })();
+  }, [loadProject]);
+
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
+  }, [messages, working]);
+
+  useEffect(() => {
+    const handleShortcut = (event: globalThis.KeyboardEvent) => {
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'n') {
+        event.preventDefault();
+        startNewMovie();
+      }
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'k') {
+        event.preventDefault();
+        setView('projects');
+        setTimeout(() => searchRef.current?.focus(), 50);
+      }
+    };
+    window.addEventListener('keydown', handleShortcut);
+    return () => window.removeEventListener('keydown', handleShortcut);
+  });
+
+  const startNewMovie = () => {
+    setProject(null);
+    setMessages([]);
+    setDraft('');
+    setFiles([]);
+    setView('chat');
+    setMobileNav(false);
+    setTimeout(() => textareaRef.current?.focus(), 50);
+  };
+
+  const setCurrentView = (next: View) => {
+    setView(next);
+    setMobileNav(false);
+  };
+
+  const uploadFiles = async (activeProject: StudioProject, selectedFiles: File[], role: string) => {
+    let nextProject = activeProject;
+    const uploadedMessages: StudioMessage[] = [];
+    for (const file of selectedFiles) {
+      const form = new FormData();
+      form.append('projectId', activeProject.id);
+      form.append('file', file);
+      form.append('role', role);
+      const response = await fetch('/api/files', { method: 'POST', body: form });
+      const data = await response.json() as { project?: StudioProject; message?: StudioMessage; error?: string };
+      if (!response.ok || !data.project) throw new Error(data.error || `“${file.name}” could not be stored.`);
+      nextProject = data.project;
+      if (data.message) uploadedMessages.push(data.message);
+    }
+    setProject(nextProject);
+    setMessages((current) => [...current, ...uploadedMessages]);
+  };
+
+  const submitInstruction = useCallback(async (instruction: string, selectedFiles: File[] = []) => {
+    const content = instruction.trim();
+    if ((!content && selectedFiles.length === 0) || working) return;
+    setWorking(true);
+    setError('');
+    try {
+      const fallbackContent = selectedFiles.length ? 'Store these references in this project.' : '';
+      const response = await fetch('/api/studio', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ projectId: project?.id, message: content || fallbackContent }),
+      });
+      const data = await response.json() as { project?: StudioProject; messages?: StudioMessage[]; projects?: ProjectSummary[]; error?: string; sideEffect?: string };
+      if (!response.ok || !data.project) throw new Error(data.error || 'The instruction could not be applied.');
+      setProject(data.project);
+      setMessages((current) => project ? [...current, ...(data.messages ?? [])] : (data.messages ?? []));
+      setProjects(data.projects ?? projects);
+      if (selectedFiles.length) {
+        const role = /my (photo|picture|image)|likeness|main character/i.test(content) ? 'Main character likeness reference' : 'Production reference';
+        await uploadFiles(data.project, selectedFiles, role);
+      }
+      setDraft('');
+      setFiles([]);
+      if (data.sideEffect === 'export') window.setTimeout(() => downloadExport(data.project!.id), 300);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'The instruction could not be applied.');
+    } finally {
+      setWorking(false);
+    }
+  }, [project, projects, working]);
+
+  const onSubmit = (event: FormEvent) => {
+    event.preventDefault();
+    void submitInstruction(draft, files);
+  };
+
+  const onComposerKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
+    if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) {
+      event.preventDefault();
+      void submitInstruction(draft, files);
+    }
+  };
+
+  const onAction = (message: string) => {
+    setView('chat');
+    void submitInstruction(message);
+  };
+
+  const downloadExport = (projectId = project?.id) => {
+    if (!projectId) return;
+    const anchor = document.createElement('a');
+    anchor.href = `/api/export?projectId=${encodeURIComponent(projectId)}`;
+    anchor.download = '';
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+  };
+
+  const updateProject = async (body: Record<string, unknown>) => {
+    if (!project) return;
+    const response = await fetch('/api/studio', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ projectId: project.id, ...body }) });
+    const data = await response.json() as { project?: StudioProject; projects?: ProjectSummary[]; error?: string };
+    if (!response.ok || !data.project) throw new Error(data.error || 'The project could not be updated.');
+    setProject(data.project);
+    setProjects(data.projects ?? projects);
+  };
+
+  const filteredProjects = useMemo(() => projects.filter((item) => item.title.toLowerCase().includes(search.toLowerCase())), [projects, search]);
+  const filteredAssets = useMemo(() => {
+    if (!project) return [];
+    if (assetFilter === 'All') return project.assets;
+    if (assetFilter === 'Approved') return project.assets.filter((asset) => ['Approved', 'Locked'].includes(asset.approvalState));
+    if (assetFilter === 'Pending') return project.assets.filter((asset) => asset.approvalState === 'Pending');
+    if (assetFilter === 'Needs Review') return project.assets.filter((asset) => asset.approvalState === 'Needs Review');
+    return project.assets.filter((asset) => asset.category === assetFilter);
+  }, [assetFilter, project]);
+
+  const activeSummary = project ? projects.find((item) => item.id === project.id) : undefined;
+
+  return (
+    <main className="film-grain flex h-dvh overflow-hidden bg-background text-foreground">
+      {mobileNav && <button type="button" aria-label="Close navigation" className="fixed inset-0 z-40 bg-black/55 backdrop-blur-sm md:hidden" onClick={() => setMobileNav(false)} />}
+      <aside className={cn('z-50 flex w-[248px] shrink-0 flex-col border-r border-sidebar-border bg-sidebar px-3 py-4 transition-transform max-md:fixed max-md:inset-y-0 max-md:left-0', mobileNav ? 'translate-x-0' : 'max-md:-translate-x-full')}>
+        <div className="flex items-center gap-2.5 px-2 pb-6">
+          <span className="brand-mark grid size-8 place-items-center rounded-[10px]"><Clapperboard className="size-[17px]" strokeWidth={1.8} /></span>
+          <div className="min-w-0 flex-1 leading-none"><p className="truncate text-[15px] font-semibold tracking-[-0.02em]">Continuity Studio</p><p className="mt-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">Production 02</p></div>
+          <Button variant="ghost" size="icon-sm" className="md:hidden" onClick={() => setMobileNav(false)} aria-label="Close navigation"><X /></Button>
+        </div>
+        <Button className="h-10 w-full justify-start gap-2.5 rounded-xl bg-primary px-3 shadow-[0_8px_24px_-12px_var(--primary)]" onClick={startNewMovie}><Plus />New Movie</Button>
+        <nav className="mt-4 space-y-1" aria-label="Workspace">
+          {primaryNavigation.map(({ id, label, icon: Icon }) => (
+            <Button key={id} variant="ghost" onClick={() => setCurrentView(id)} className={cn('h-9 w-full justify-start gap-3 rounded-lg px-3 text-muted-foreground hover:text-foreground', view === id && 'bg-sidebar-accent text-sidebar-accent-foreground')}>
+              <Icon className="size-4" strokeWidth={1.7} />{label}
+            </Button>
+          ))}
+        </nav>
+        <div className="mt-7 flex items-center justify-between px-3"><p className="text-[10px] font-semibold uppercase tracking-[0.16em] text-muted-foreground/70">Your projects</p>{projects.length > 0 && <button type="button" onClick={() => setCurrentView('projects')} className="text-[10px] text-muted-foreground hover:text-foreground">View all</button>}</div>
+        <div className="mt-2 min-h-0 space-y-1 overflow-y-auto">
+          {projects.length === 0 ? <p className="px-3 pt-2 text-xs leading-5 text-muted-foreground/70">Your movies will appear here.</p> : projects.slice(0, 8).map((item) => (
+            <button key={item.id} type="button" onClick={() => void loadProject(item.id)} className={cn('group w-full rounded-lg px-3 py-2.5 text-left transition hover:bg-sidebar-accent', project?.id === item.id && view === 'chat' && 'bg-sidebar-accent')}>
+              <div className="flex items-center gap-2"><span className="truncate text-xs font-medium">{item.title}</span>{item.pinned && <Pin className="ml-auto size-3 shrink-0 text-amber-300" />}</div>
+              <div className="mt-1.5 flex items-center gap-2"><Progress value={item.progress} className="min-w-0 flex-1" /><span className="text-[9px] tabular-nums text-muted-foreground">{item.progress}%</span></div>
+            </button>
+          ))}
+        </div>
+        <div className="mt-auto border-t border-sidebar-border pt-3"><Button variant="ghost" onClick={() => setCurrentView('settings')} className={cn('h-9 w-full justify-start gap-3 rounded-lg px-3 text-muted-foreground hover:text-foreground', view === 'settings' && 'bg-sidebar-accent text-foreground')}><Settings className="size-4" strokeWidth={1.7} />Settings</Button></div>
+      </aside>
+
+      <section className="relative flex min-w-0 flex-1 flex-col bg-[radial-gradient(circle_at_50%_30%,var(--ambient),transparent_34rem)]">
+        <header className="flex h-14 shrink-0 items-center justify-between border-b border-border/70 px-3 sm:px-5">
+          <div className="flex min-w-0 items-center gap-2">
+            <Button variant="ghost" size="icon" className="md:hidden" onClick={() => setMobileNav(true)} aria-label="Open navigation"><Menu /></Button>
+            {project && view !== 'chat' ? <Button variant="ghost" size="sm" onClick={() => setView('chat')}><ArrowLeft />Back to movie</Button> : project ? <ProjectStatus project={project} /> : <div className="hidden items-center gap-2 text-xs text-muted-foreground sm:flex"><span className="size-1.5 rounded-full bg-[var(--ready)] shadow-[0_0_10px_var(--ready)]" />Ready for a new production</div>}
+          </div>
+          <div className="flex items-center gap-1">
+            {project && <Button variant="ghost" size="icon" onClick={() => void updateProject({ action: 'pin' })} aria-label={project.pinned ? 'Unpin project' : 'Pin project'}><Pin className={cn('size-4', project.pinned && 'fill-amber-300 text-amber-300')} /></Button>}
+            <Button variant="ghost" size="icon" onClick={() => setCurrentView('settings')} aria-label="Settings"><Settings className="size-4" /></Button>
+          </div>
+        </header>
+
+        {booting ? <LoadingSurface /> : view === 'chat' ? (
+          <ChatView project={project} messages={messages} working={working} error={error} onAction={onAction} onOpenLibrary={() => setView('assets')} onExport={() => downloadExport()} endRef={messagesEndRef} />
+        ) : view === 'projects' ? (
+          <ProjectsView projects={filteredProjects} search={search} setSearch={setSearch} searchRef={searchRef} onOpen={loadProject} onNew={startNewMovie} />
+        ) : view === 'assets' ? (
+          <AssetsView project={project} assets={filteredAssets} filter={assetFilter} setFilter={setAssetFilter} onAction={onAction} onNew={startNewMovie} />
+        ) : view === 'exports' ? (
+          <ExportsView project={project} onExport={() => downloadExport()} onNew={startNewMovie} />
+        ) : (
+          <SettingsView project={project} lightMode={lightMode} setLightMode={(value) => { setLightMode(value); document.documentElement.classList.toggle('dark', !value); }} onUpdate={(settings) => void updateProject({ action: 'settings', settings })} />
+        )}
+
+        {view === 'chat' && (
+          <div className="pointer-events-none absolute inset-x-0 bottom-0 z-20 bg-gradient-to-t from-background via-background to-transparent px-3 pb-3 pt-16 sm:px-6 sm:pb-5">
+            <form onSubmit={onSubmit} onDragEnter={(event) => { event.preventDefault(); setDragging(true); }} onDragOver={(event) => event.preventDefault()} onDragLeave={() => setDragging(false)} onDrop={(event) => { event.preventDefault(); setDragging(false); setFiles((current) => [...current, ...Array.from(event.dataTransfer.files)]); }} className={cn('composer pointer-events-auto mx-auto w-full max-w-[780px] rounded-[20px] border bg-card p-2.5 transition', dragging && 'border-amber-300/60 ring-4 ring-amber-300/10')}>
+              {files.length > 0 && <div className="flex flex-wrap gap-1.5 px-2 pb-2">{files.map((file, index) => <span key={`${file.name}-${index}`} className="flex items-center gap-1.5 rounded-full border border-border bg-secondary px-2.5 py-1 text-[10px]"><Paperclip className="size-3" /><span className="max-w-40 truncate">{file.name}</span><button type="button" onClick={() => setFiles((current) => current.filter((_, itemIndex) => itemIndex !== index))} aria-label={`Remove ${file.name}`}><X className="size-3 text-muted-foreground hover:text-foreground" /></button></span>)}</div>}
+              <label htmlFor="movie-idea" className="sr-only">{project ? 'Tell the studio what to do' : 'Describe your movie'}</label>
+              <textarea ref={textareaRef} id="movie-idea" rows={2} value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={onComposerKeyDown} placeholder={project ? 'Ask for a change, show an asset, or continue the movie…' : 'Describe the movie you want to make…'} className="max-h-40 min-h-[54px] w-full resize-none bg-transparent px-2.5 py-2 text-[15px] leading-6 outline-none placeholder:text-muted-foreground/65" />
+              <div className="flex items-center justify-between pt-1">
+                <div className="flex items-center gap-1">
+                  <input ref={fileInputRef} type="file" multiple className="sr-only" accept="image/*,video/*,audio/*,.pdf,.doc,.docx,.txt" onChange={(event) => setFiles((current) => [...current, ...Array.from(event.target.files ?? [])])} />
+                  <Button type="button" variant="ghost" size="icon" className="rounded-full" onClick={() => fileInputRef.current?.click()} aria-label="Attach reference"><Paperclip className="size-[18px]" strokeWidth={1.7} /></Button>
+                  <Button type="button" variant="ghost" size="icon" className="rounded-full" disabled title="Microphone input is optional and not enabled in this browser" aria-label="Microphone unavailable"><Mic className="size-[18px]" strokeWidth={1.7} /></Button>
+                  {project && <span className="ml-1 hidden text-[10px] text-muted-foreground sm:inline">Try /assets, /sequences, /status</span>}
+                </div>
+                <Button type="submit" size="icon" disabled={working || (!draft.trim() && files.length === 0)} className="size-9 rounded-full" aria-label="Send instruction">{working ? <LoaderCircle className="animate-spin" /> : <ArrowUp className="size-[18px]" strokeWidth={2} />}</Button>
+              </div>
+            </form>
+            <p className="mt-2 text-center text-[10px] text-muted-foreground/65">Ctrl + Enter to send · Ctrl + N for a new movie</p>
+          </div>
+        )}
+      </section>
+    </main>
+  );
+}
+
+function LoadingSurface() {
+  return <div className="grid flex-1 place-items-center"><div className="flex items-center gap-2 text-sm text-muted-foreground"><LoaderCircle className="size-4 animate-spin" />Opening project memory…</div></div>;
+}
+
+function ChatView({ project, messages, working, error, onAction, onOpenLibrary, onExport, endRef }: { project: StudioProject | null; messages: StudioMessage[]; working: boolean; error: string; onAction: (message: string) => void; onOpenLibrary: () => void; onExport: () => void; endRef: React.RefObject<HTMLDivElement | null> }) {
+  if (!project && messages.length === 0) return (
+    <div className="min-h-0 flex-1 overflow-y-auto">
+      <div className="mx-auto flex min-h-full w-full max-w-[780px] flex-col items-center justify-center px-5 pb-40 pt-16 text-center sm:px-8">
+        <EmptyProjectMark />
+        <p className="eyebrow mb-3 mt-7">A blank reel. Your direction.</p>
+        <h1 className="text-balance text-[clamp(2rem,5vw,3.7rem)] font-medium leading-[1.04] tracking-[-0.055em]">What movie do you want to create?</h1>
+        <p className="mt-5 max-w-md text-pretty text-sm leading-6 text-muted-foreground sm:text-[15px]">Describe your idea in one sentence. I’ll shape the story, organize the production, and keep every detail continuous.</p>
+        {error && <p className="mt-6 rounded-xl border border-rose-400/20 bg-rose-400/10 px-4 py-2 text-xs text-rose-200">{error}</p>}
+      </div>
+    </div>
+  );
+  return (
+    <div className="min-h-0 flex-1 overflow-y-auto scroll-smooth">
+      <div className="mx-auto w-full max-w-[780px] space-y-7 px-4 pb-48 pt-8 sm:px-6 sm:pt-12">
+        {messages.map((item) => <MessageItem key={item.id} item={item} project={project!} onAction={onAction} onOpenLibrary={onOpenLibrary} onExport={onExport} />)}
+        {working && <div className="flex items-center gap-3"><span className="brand-mark grid size-7 place-items-center rounded-lg"><Clapperboard className="size-3.5" /></span><div className="flex gap-1.5"><span className="size-1.5 animate-pulse rounded-full bg-muted-foreground" /><span className="size-1.5 animate-pulse rounded-full bg-muted-foreground [animation-delay:120ms]" /><span className="size-1.5 animate-pulse rounded-full bg-muted-foreground [animation-delay:240ms]" /></div></div>}
+        {error && <p className="rounded-xl border border-rose-400/20 bg-rose-400/10 px-4 py-2 text-xs text-rose-200">{error}</p>}
+        <div ref={endRef} />
+      </div>
+    </div>
+  );
+}
+
+function PageFrame({ eyebrow, title, description, children, action }: { eyebrow: string; title: string; description: string; children: React.ReactNode; action?: React.ReactNode }) {
+  return <div className="min-h-0 flex-1 overflow-y-auto"><div className="mx-auto w-full max-w-6xl px-5 py-8 sm:px-8 sm:py-12"><div className="flex flex-col justify-between gap-5 sm:flex-row sm:items-end"><div><p className="eyebrow">{eyebrow}</p><h1 className="mt-2 text-3xl font-medium tracking-[-0.045em] sm:text-4xl">{title}</h1><p className="mt-3 max-w-2xl text-sm leading-6 text-muted-foreground">{description}</p></div>{action}</div><div className="mt-8">{children}</div></div></div>;
+}
+
+function ProjectsView({ projects, search, setSearch, searchRef, onOpen, onNew }: { projects: ProjectSummary[]; search: string; setSearch: (value: string) => void; searchRef: React.RefObject<HTMLInputElement | null>; onOpen: (id: string) => Promise<void>; onNew: () => void }) {
+  return <PageFrame eyebrow="Project memory" title="Your movies" description="Every conversation, approval, version, reference, and continuity decision returns with the project." action={<Button onClick={onNew}><Plus />New Movie</Button>}>
+    <div className="relative max-w-md"><Search className="absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" /><Input ref={searchRef} value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search projects, characters, locations…" className="h-10 rounded-xl pl-9" /></div>
+    {projects.length === 0 ? <EmptyCollection icon={FolderClock} title={search ? 'No matching movies' : 'No movies yet'} text={search ? 'Try another project name.' : 'Start with one sentence in chat. Your first real project will appear here.'} action={!search ? <Button onClick={onNew}><Plus />Create a movie</Button> : undefined} /> : <div className="mt-6 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">{projects.map((item) => <button key={item.id} type="button" onClick={() => void onOpen(item.id)} className="group rounded-2xl border border-border bg-card/55 p-4 text-left transition hover:-translate-y-0.5 hover:border-amber-300/25 hover:bg-card"><div className="flex items-start justify-between gap-3"><span className="grid size-10 place-items-center rounded-xl border border-amber-300/15 bg-amber-300/8 text-amber-200"><Clapperboard className="size-5" /></span><div className="flex items-center gap-1 text-[10px] text-muted-foreground">{item.pinned && <Pin className="size-3 text-amber-300" />}{relativeTime(item.updatedAt)}</div></div><h2 className="mt-5 truncate text-sm font-medium">{item.title}</h2><p className="mt-1 text-xs text-muted-foreground">{durationLabel(item.durationSeconds)} · {item.sequenceCount} sequences · {item.stage}</p><div className="mt-5 flex items-center gap-3"><Progress value={item.progress} className="flex-1" /><span className="text-[10px] tabular-nums text-muted-foreground">{item.progress}%</span></div></button>)}</div>}
+  </PageFrame>;
+}
+
+function AssetsView({ project, assets, filter, setFilter, onAction, onNew }: { project: StudioProject | null; assets: StudioAsset[]; filter: string; setFilter: (value: string) => void; onAction: (message: string) => void; onNew: () => void }) {
+  return <PageFrame eyebrow="Visual source of truth" title="Asset Library" description="Permanent IDs, references, approvals, locks, and version history for the active movie." action={project ? <Badge variant="outline">{project.assets.length} assets</Badge> : undefined}>
+    {!project ? <EmptyCollection icon={Library} title="No active movie" text="Create or open a movie to see its isolated asset library." action={<Button onClick={onNew}><Plus />Create a movie</Button>} /> : <><div className="flex gap-2 overflow-x-auto pb-2">{assetFilters.map((item) => <Button key={item} size="sm" variant={filter === item ? 'default' : 'outline'} onClick={() => setFilter(item)} className="shrink-0">{item}</Button>)}</div>{assets.length === 0 ? <EmptyCollection icon={ImageIcon} title={`No ${filter.toLowerCase()} assets`} text="This filter has no matching assets in the active project." /> : <div className="mt-5 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5">{assets.map((asset) => <AssetMiniCard key={asset.id} asset={asset} onAction={onAction} />)}</div>}</>}
+  </PageFrame>;
+}
+
+function ExportsView({ project, onExport, onNew }: { project: StudioProject | null; onExport: () => void; onNew: () => void }) {
+  return <PageFrame eyebrow="Preserve the production" title="Exports" description="Download a portable package with human-readable creative documents and complete structured project memory.">
+    {!project ? <EmptyCollection icon={Archive} title="No active movie" text="Open a movie before preparing its production package." action={<Button onClick={onNew}><Plus />Create a movie</Button>} /> : <div className="grid gap-4 lg:grid-cols-[1.5fr_1fr]"><div className="rounded-2xl border border-border bg-card/55 p-5"><div className="flex items-start gap-4"><span className="grid size-12 shrink-0 place-items-center rounded-xl bg-amber-300/10 text-amber-200"><FileArchive className="size-6" /></span><div><h2 className="font-medium">{project.title} · Full Project</h2><p className="mt-2 max-w-xl text-sm leading-6 text-muted-foreground">A compressed production folder with the story, script, Film Bible, asset manifest, exact sequence prompts, continuity records, references, generation history, and project metadata.</p></div></div><div className="mt-5 flex flex-wrap gap-2"><Badge variant="outline">No API keys</Badge><Badge variant="outline">Stable filenames</Badge><Badge variant="outline">Original references</Badge><Badge variant="outline">Version history</Badge></div><Button className="mt-6" onClick={onExport}><Download />Download full project</Button></div><div className="rounded-2xl border border-border bg-background/45 p-5"><p className="text-xs font-medium">Package status</p><div className="mt-4 space-y-3"><StatusLine label="Story" value={project.story.status} /><StatusLine label="Film Bible" value={project.filmBible.status} /><StatusLine label="References" value={`${project.attachments.length} stored`} /><StatusLine label="Last export" value={project.exportStatus} /></div></div></div>}
+  </PageFrame>;
+}
+
+function SettingsView({ project, lightMode, setLightMode, onUpdate }: { project: StudioProject | null; lightMode: boolean; setLightMode: (value: boolean) => void; onUpdate: (settings: Partial<StudioProject['settings']>) => void }) {
+  const settingSections = [
+    { title: 'AI Brain', icon: Sparkles, description: 'Automatic Mode interprets instructions and chooses the normal next production step.', control: <Switch checked={project?.settings.automaticMode ?? true} onCheckedChange={(checked) => onUpdate({ automaticMode: checked })} disabled={!project} /> },
+    { title: 'Image Generation', icon: ImageIcon, description: project?.settings.imageProvider === 'Not connected' ? 'No image provider connected. Prompts and references remain safe until you choose one.' : project?.settings.imageProvider ?? 'Not connected', control: <Badge variant="outline">Not connected</Badge> },
+    { title: 'Video Generation', icon: Film, description: 'Seedance-ready prompt adapter with provider-specific generation kept behind a clean interface.', control: <Badge variant="outline" className="border-sky-400/20 bg-sky-400/10 text-sky-200">Prompt ready</Badge> },
+    { title: 'Storage', icon: Upload, description: 'Structured project memory and original media are stored separately and isolated by project ID.', control: <Badge variant="outline">Private</Badge> },
+    { title: 'Appearance', icon: lightMode ? Sun : Moon, description: 'Choose the interface contrast for this device.', control: <Switch checked={lightMode} onCheckedChange={setLightMode} /> },
+    { title: 'Privacy', icon: Lock, description: 'Media is sent to a provider only when you request generation. API keys never enter exports.', control: <Switch checked={project?.settings.privacyMode ?? true} onCheckedChange={(checked) => onUpdate({ privacyMode: checked })} disabled={!project} /> },
+  ];
+  return <PageFrame eyebrow="Quiet controls" title="Settings" description="Provider connections and production defaults stay away from the main filmmaking conversation."><div className="max-w-3xl divide-y divide-border overflow-hidden rounded-2xl border border-border bg-card/55">{settingSections.map(({ title, icon: Icon, description, control }) => <div key={title} className="flex items-center gap-4 p-4 sm:p-5"><span className="grid size-9 shrink-0 place-items-center rounded-lg bg-secondary text-muted-foreground"><Icon className="size-4" /></span><div className="min-w-0 flex-1"><h2 className="text-sm font-medium">{title}</h2><p className="mt-1 text-xs leading-5 text-muted-foreground">{description}</p></div>{control}</div>)}</div><details className="mt-5 max-w-3xl rounded-xl border border-border px-4 py-3"><summary className="cursor-pointer text-sm font-medium">Advanced</summary><p className="mt-3 text-xs leading-5 text-muted-foreground">Provider adapter settings, model preferences, aspect ratio, resolution, storage policy, export policy, and negative rules are available through project chat or a connected provider.</p></details></PageFrame>;
+}
+
+function EmptyCollection({ icon: Icon, title, text, action }: { icon: typeof Library; title: string; text: string; action?: React.ReactNode }) {
+  return <div className="mt-6 flex min-h-72 flex-col items-center justify-center rounded-2xl border border-dashed border-border bg-card/20 px-6 text-center"><span className="grid size-11 place-items-center rounded-xl bg-secondary text-muted-foreground"><Icon className="size-5" /></span><h2 className="mt-4 text-sm font-medium">{title}</h2><p className="mt-2 max-w-sm text-xs leading-5 text-muted-foreground">{text}</p>{action && <div className="mt-5">{action}</div>}</div>;
+}
