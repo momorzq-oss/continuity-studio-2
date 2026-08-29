@@ -1,7 +1,7 @@
 import { strToU8, zipSync } from 'fflate';
 
 import { ensureSchema, getRuntimeEnv } from '@/db/runtime';
-import { nowIso, type StudioProject } from '@/lib/studio';
+import { normalizeProject, nowIso, type StudioProject } from '@/lib/studio';
 
 export const runtime = 'edge';
 
@@ -23,7 +23,7 @@ export async function GET(request: Request) {
       .bind(projectId)
       .first<{ state_json: string }>();
     if (!row) return Response.json({ error: 'That project is no longer available.' }, { status: 404 });
-    const project = JSON.parse(row.state_json) as StudioProject;
+    const project = normalizeProject(JSON.parse(row.state_json) as StudioProject);
     const messages = await DB.prepare(
       'SELECT id, role, content, metadata_json, created_at FROM chat_messages WHERE project_id = ? ORDER BY created_at ASC',
     ).bind(projectId).all();
@@ -36,7 +36,7 @@ export async function GET(request: Request) {
     const root = safeName(project.title);
     const files: Record<string, Uint8Array> = {
       [`${root}/project.json`]: text(project),
-      [`${root}/PROJECT_SUMMARY.md`]: text(`# ${project.title}\n\n${project.story.logline}\n\n- Duration: ${project.durationSeconds / 60} minutes\n- Sequences: ${project.sequenceCount}\n- Genre: ${project.genre} / ${project.subgenre}\n- Story: ${project.story.status}\n- Film Bible: ${project.filmBible.status}\n- Continuity: ${project.continuity.status}\n`),
+      [`${root}/PROJECT_SUMMARY.md`]: text(`# ${project.title}\n\n${project.story.logline}\n\n- Duration: ${project.durationSeconds / 60} minutes\n- Sequences: ${project.sequenceCount}\n- Genre: ${project.genre} / ${project.subgenre}\n- Story: ${project.story.status}\n- World Bible: ${project.worldBible.status}\n- Film Bible: ${project.filmBible.status}\n- Structured locations: ${project.locations.length}\n- Environment states: ${project.environments.length}\n- Knowledge relationships: ${project.knowledgeGraph.edges.length}\n- Asset state events: ${project.stateEvents.length}\n- Continuity: ${project.continuity.status}\n`),
       [`${root}/story/story.json`]: text(project.story),
       [`${root}/script/sequence_script.json`]: text(project.sequences.map((sequence) => ({
         id: sequence.id, duration: sequence.duration, title: sequence.title, purpose: sequence.purpose,
@@ -44,9 +44,22 @@ export async function GET(request: Request) {
         openingState: sequence.openingState, closingState: sequence.closingState,
       }))),
       [`${root}/film_bible/film_bible.json`]: text(project.filmBible),
+      [`${root}/world_bible/world_bible.json`]: text(project.worldBible),
+      [`${root}/locations/location_manifest.json`]: text(project.locations),
+      [`${root}/environments/environment_states.json`]: text(project.environments),
       [`${root}/assets/asset_manifest.json`]: text(project.assets),
+      [`${root}/assets/reference_coverage.json`]: text(project.assets.map((asset) => ({
+        assetId: asset.id,
+        permanentIdentity: asset.permanentIdentity,
+        importance: asset.importance,
+        requiredDepth: asset.referenceDepth,
+        references: asset.referenceCount,
+        coverage: asset.referenceCoverage,
+      }))),
       [`${root}/sequences/sequence_plan.json`]: text(project.sequences),
       [`${root}/continuity/continuity_report.json`]: text(project.continuity),
+      [`${root}/continuity/asset_state_events.json`]: text(project.stateEvents),
+      [`${root}/knowledge_graph/project_knowledge_graph.json`]: text(project.knowledgeGraph),
       [`${root}/reports/chat_history.json`]: text(messages.results),
       [`${root}/reports/generation_history.json`]: text(jobs.results),
       [`${root}/reports/reference_manifest.json`]: text(references.results.map(({ media_key: _mediaKey, ...reference }) => reference)),
@@ -56,12 +69,23 @@ export async function GET(request: Request) {
     };
     for (const sequence of project.sequences) {
       files[`${root}/prompts/${sequence.id}_PROMPT_V${String(sequence.version).padStart(2, '0')}.txt`] = text(sequence.prompt);
+      files[`${root}/scene_states/${sequence.id}_SCENE_STATE.json`] = text(sequence.sceneState);
+      files[`${root}/scene_graphs/${sequence.id}_SCENE_GRAPH.json`] = text(sequence.sceneGraph);
+      files[`${root}/sequence_manifests/${sequence.id}_ASSET_MANIFEST.json`] = text(sequence.assetManifest);
+      files[`${root}/ending_states/${sequence.id}_ENDING_STATE.json`] = text(sequence.endingState);
+      files[`${root}/look_ahead/${sequence.id}_LOOK_AHEAD.json`] = text(sequence.lookAhead);
       files[`${root}/continuity/CONTINUITY_${sequence.id}.json`] = text({
         continuitySource: sequence.continuitySource,
         openingState: sequence.openingState,
         closingState: sequence.closingState,
+        sceneState: sequence.sceneState,
+        endingState: sequence.endingState,
+        sceneGraph: sequence.sceneGraph,
         events: project.continuity.events.filter((event) => event.sequenceNumber === sequence.number),
       });
+    }
+    for (const location of project.locations) {
+      files[`${root}/locations/${location.id}_V${String(location.version).padStart(2, '0')}.json`] = text(location);
     }
     for (const reference of references.results) {
       const object = await FILES.get(reference.media_key);

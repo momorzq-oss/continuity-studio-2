@@ -8,6 +8,13 @@
       "when": 1788005219341,
       "tag": "0000_familiar_talisman",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "6",
+      "when": 1788006726466,
+      "tag": "0001_equal_bug",
+      "breakpoints": true
     }
   ]
 }

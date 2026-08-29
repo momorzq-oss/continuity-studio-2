@@ -195,6 +195,86 @@ const schemaStatements = [
     updated_at TEXT NOT NULL,
     UNIQUE(project_id, setting_key)
   )`,
+  `CREATE TABLE IF NOT EXISTS world_bible_versions (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    version INTEGER NOT NULL,
+    content_json TEXT NOT NULL,
+    approval_status TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE(project_id, version)
+  )`,
+  `CREATE TABLE IF NOT EXISTS world_locations (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    stable_id TEXT NOT NULL,
+    location_type TEXT NOT NULL,
+    content_json TEXT NOT NULL,
+    version INTEGER NOT NULL DEFAULT 1,
+    updated_at TEXT NOT NULL,
+    UNIQUE(project_id, stable_id)
+  )`,
+  `CREATE TABLE IF NOT EXISTS environment_states (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    stable_id TEXT NOT NULL,
+    location_stable_id TEXT NOT NULL,
+    active_from_sequence INTEGER NOT NULL,
+    active_through_sequence INTEGER NOT NULL,
+    content_json TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(project_id, stable_id)
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_environment_states_project_location ON environment_states(project_id, location_stable_id)`,
+  `CREATE TABLE IF NOT EXISTS scene_states (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    sequence_number INTEGER NOT NULL,
+    scene_state_json TEXT NOT NULL,
+    scene_graph_json TEXT NOT NULL,
+    asset_manifest_json TEXT NOT NULL,
+    ending_state_json TEXT NOT NULL,
+    look_ahead_json TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(project_id, sequence_number)
+  )`,
+  `CREATE TABLE IF NOT EXISTS knowledge_graph_edges (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    edge_id TEXT NOT NULL,
+    from_id TEXT NOT NULL,
+    to_id TEXT NOT NULL,
+    relationship TEXT NOT NULL,
+    sequence_number INTEGER NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(project_id, edge_id)
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_knowledge_graph_project_from ON knowledge_graph_edges(project_id, from_id)`,
+  `CREATE INDEX IF NOT EXISTS idx_knowledge_graph_project_to ON knowledge_graph_edges(project_id, to_id)`,
+  `CREATE TABLE IF NOT EXISTS asset_state_events (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    sequence_number INTEGER NOT NULL,
+    asset_stable_id TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    previous_state TEXT NOT NULL,
+    next_state TEXT NOT NULL,
+    location_stable_id TEXT NOT NULL,
+    actor_stable_id TEXT NOT NULL,
+    notes TEXT NOT NULL,
+    created_at TEXT NOT NULL
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_asset_state_events_project_asset_sequence ON asset_state_events(project_id, asset_stable_id, sequence_number)`,
+  `CREATE TABLE IF NOT EXISTS reference_coverage (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    asset_stable_id TEXT NOT NULL,
+    coverage_json TEXT NOT NULL,
+    reference_count INTEGER NOT NULL DEFAULT 0,
+    risk_level TEXT NOT NULL DEFAULT 'Low',
+    updated_at TEXT NOT NULL,
+    UNIQUE(project_id, asset_stable_id)
+  )`,
   `PRAGMA optimize`,
 ] as const;
 

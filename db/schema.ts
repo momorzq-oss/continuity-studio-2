@@ -261,3 +261,117 @@ export const projectSettings = sqliteTable(
   },
   (table) => [uniqueIndex('idx_project_settings_project_key').on(table.projectId, table.settingKey)],
 );
+
+export const worldBibleVersions = sqliteTable(
+  'world_bible_versions',
+  {
+    id: text('id').primaryKey(),
+    projectId: text('project_id').notNull().references(() => projects.id, { onDelete: 'cascade' }),
+    version: integer('version').notNull(),
+    contentJson: text('content_json').notNull(),
+    approvalStatus: text('approval_status').notNull(),
+    createdAt: text('created_at').notNull(),
+  },
+  (table) => [uniqueIndex('idx_world_bible_project_version').on(table.projectId, table.version)],
+);
+
+export const worldLocations = sqliteTable(
+  'world_locations',
+  {
+    id: text('id').primaryKey(),
+    projectId: text('project_id').notNull().references(() => projects.id, { onDelete: 'cascade' }),
+    stableId: text('stable_id').notNull(),
+    locationType: text('location_type').notNull(),
+    contentJson: text('content_json').notNull(),
+    version: integer('version').notNull().default(1),
+    updatedAt: text('updated_at').notNull(),
+  },
+  (table) => [uniqueIndex('idx_world_locations_project_stable').on(table.projectId, table.stableId)],
+);
+
+export const environmentStates = sqliteTable(
+  'environment_states',
+  {
+    id: text('id').primaryKey(),
+    projectId: text('project_id').notNull().references(() => projects.id, { onDelete: 'cascade' }),
+    stableId: text('stable_id').notNull(),
+    locationStableId: text('location_stable_id').notNull(),
+    activeFromSequence: integer('active_from_sequence').notNull(),
+    activeThroughSequence: integer('active_through_sequence').notNull(),
+    contentJson: text('content_json').notNull(),
+    updatedAt: text('updated_at').notNull(),
+  },
+  (table) => [
+    uniqueIndex('idx_environment_states_project_stable').on(table.projectId, table.stableId),
+    index('idx_environment_states_project_location').on(table.projectId, table.locationStableId),
+  ],
+);
+
+export const sceneStates = sqliteTable(
+  'scene_states',
+  {
+    id: text('id').primaryKey(),
+    projectId: text('project_id').notNull().references(() => projects.id, { onDelete: 'cascade' }),
+    sequenceNumber: integer('sequence_number').notNull(),
+    sceneStateJson: text('scene_state_json').notNull(),
+    sceneGraphJson: text('scene_graph_json').notNull(),
+    assetManifestJson: text('asset_manifest_json').notNull(),
+    endingStateJson: text('ending_state_json').notNull(),
+    lookAheadJson: text('look_ahead_json').notNull(),
+    updatedAt: text('updated_at').notNull(),
+  },
+  (table) => [uniqueIndex('idx_scene_states_project_sequence').on(table.projectId, table.sequenceNumber)],
+);
+
+export const knowledgeGraphEdges = sqliteTable(
+  'knowledge_graph_edges',
+  {
+    id: text('id').primaryKey(),
+    projectId: text('project_id').notNull().references(() => projects.id, { onDelete: 'cascade' }),
+    edgeId: text('edge_id').notNull(),
+    fromId: text('from_id').notNull(),
+    toId: text('to_id').notNull(),
+    relationship: text('relationship').notNull(),
+    sequenceNumber: integer('sequence_number').notNull(),
+    updatedAt: text('updated_at').notNull(),
+  },
+  (table) => [
+    uniqueIndex('idx_knowledge_graph_project_edge').on(table.projectId, table.edgeId),
+    index('idx_knowledge_graph_project_from').on(table.projectId, table.fromId),
+    index('idx_knowledge_graph_project_to').on(table.projectId, table.toId),
+  ],
+);
+
+export const assetStateEvents = sqliteTable(
+  'asset_state_events',
+  {
+    id: text('id').primaryKey(),
+    projectId: text('project_id').notNull().references(() => projects.id, { onDelete: 'cascade' }),
+    sequenceNumber: integer('sequence_number').notNull(),
+    assetStableId: text('asset_stable_id').notNull(),
+    eventType: text('event_type').notNull(),
+    previousState: text('previous_state').notNull(),
+    nextState: text('next_state').notNull(),
+    locationStableId: text('location_stable_id').notNull(),
+    actorStableId: text('actor_stable_id').notNull(),
+    notes: text('notes').notNull(),
+    createdAt: text('created_at').notNull(),
+  },
+  (table) => [
+    index('idx_asset_state_events_project_asset_sequence').on(table.projectId, table.assetStableId, table.sequenceNumber),
+  ],
+);
+
+export const referenceCoverage = sqliteTable(
+  'reference_coverage',
+  {
+    id: text('id').primaryKey(),
+    projectId: text('project_id').notNull().references(() => projects.id, { onDelete: 'cascade' }),
+    assetStableId: text('asset_stable_id').notNull(),
+    coverageJson: text('coverage_json').notNull(),
+    referenceCount: integer('reference_count').notNull().default(0),
+    riskLevel: text('risk_level').notNull().default('Low'),
+    updatedAt: text('updated_at').notNull(),
+  },
+  (table) => [uniqueIndex('idx_reference_coverage_project_asset').on(table.projectId, table.assetStableId)],
+);

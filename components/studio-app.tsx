@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react';
 import {
   Archive,
   ArrowLeft,
@@ -9,7 +9,7 @@ import {
   Check,
   ChevronDown,
   Clapperboard,
-  Clock3,
+  Compass,
   Copy,
   Download,
   FileArchive,
@@ -21,10 +21,9 @@ import {
   LoaderCircle,
   Lock,
   Menu,
-  MessageSquareText,
   Mic,
   Moon,
-  MoreHorizontal,
+  Network,
   Paperclip,
   Pin,
   Play,
@@ -32,6 +31,7 @@ import {
   RefreshCw,
   Search,
   Settings,
+  ShieldCheck,
   Sparkles,
   Sun,
   Upload,
@@ -54,7 +54,7 @@ const primaryNavigation = [
   { id: 'exports' as const, label: 'Exports', icon: Archive },
 ];
 
-const assetFilters = ['All', 'Characters', 'Creatures', 'Animals', 'Locations', 'Interiors', 'Vehicles', 'Props', 'Weapons', 'Costumes', 'Approved', 'Pending', 'Needs Review'];
+const assetFilters = ['All', 'Characters', 'Creatures', 'Animals', 'Locations', 'Interiors', 'Environment States', 'Vehicles', 'Props', 'Weapons', 'Costumes', 'Furniture', 'Mechanical Systems', 'Approved', 'Pending', 'Needs Review'];
 
 function relativeTime(value: string) {
   const delta = Date.now() - new Date(value).getTime();
@@ -128,6 +128,7 @@ function ProjectStatus({ project }: { project: StudioProject }) {
           </div>
           <div className="mt-4 grid grid-cols-2 gap-x-5 gap-y-3 text-xs">
             <StatusLine label="Story" value={project.story.status} />
+            <StatusLine label="World Bible" value={project.worldBible.status} />
             <StatusLine label="Film Bible" value={project.filmBible.status} />
             <StatusLine label="Assets" value={`${approvedAssets}/${project.assets.length}`} />
             <StatusLine label="Sequences" value={`${approvedSequences}/${project.sequenceCount}`} />
@@ -203,6 +204,31 @@ function BibleCard({ project, onAction }: { project: StudioProject; onAction: (m
   );
 }
 
+function WorldCard({ project, onAction }: { project: StudioProject; onAction: (message: string) => void }) {
+  const world = project.worldBible;
+  return (
+    <section className="mt-4 overflow-hidden rounded-2xl border border-border bg-card/65">
+      <div className="flex items-center justify-between border-b border-border/70 px-4 py-3">
+        <div className="flex items-center gap-2.5"><Compass className="size-4 text-amber-300" /><span className="text-sm font-medium">World Bible · v{world.version}</span></div>
+        <Badge variant="outline" className={statusClass(world.status)}>{world.status}</Badge>
+      </div>
+      <div className="grid gap-3 p-4 text-xs sm:grid-cols-3">
+        <StateBlock label="World" value={`${world.geography} · ${world.historicalPeriod}`} />
+        <StateBlock label="Technology" value={world.technologyLevel} />
+        <StateBlock label="Culture" value={world.culture} />
+      </div>
+      <div className="grid gap-4 px-4 pb-4 sm:grid-cols-2">
+        <RuleGroup title="Materials & architecture" rules={[...world.architecture, ...world.constructionMaterials]} />
+        <RuleGroup title="Physical-world restrictions" rules={[...world.physicalRules, ...world.restrictions]} />
+      </div>
+      <div className="flex flex-wrap gap-2 border-t border-border/70 bg-background/35 px-4 py-3">
+        {world.status !== 'Approved' && <Button size="sm" onClick={() => onAction('Approve the World Bible')}><Check />Approve World Bible</Button>}
+        <Button size="sm" variant="outline" onClick={() => onAction('Show environment states')}>Environment states</Button>
+      </div>
+    </section>
+  );
+}
+
 function RuleGroup({ title, rules }: { title: string; rules: string[] }) {
   return (
     <div>
@@ -215,6 +241,7 @@ function RuleGroup({ title, rules }: { title: string; rules: string[] }) {
 }
 
 function AssetMiniCard({ asset, onAction }: { asset: StudioAsset; onAction: (message: string) => void }) {
+  const coverage = Math.round(Object.values(asset.referenceCoverage).reduce((total, value) => total + value, 0) / Object.keys(asset.referenceCoverage).length);
   return (
     <article className="group overflow-hidden rounded-xl border border-border bg-background/55">
       <div className={cn('flex h-20 items-end bg-gradient-to-br p-3', assetTone(asset.category))}>
@@ -225,7 +252,9 @@ function AssetMiniCard({ asset, onAction }: { asset: StudioAsset; onAction: (mes
           <div className="min-w-0"><p className="truncate text-xs font-medium">{asset.name}</p><p className="mt-0.5 font-mono text-[9px] text-muted-foreground">{asset.id} · V{String(asset.version).padStart(2, '0')}</p></div>
           {asset.lockState === 'Locked' && <Lock className="size-3.5 shrink-0 text-emerald-300" />}
         </div>
-        <Badge variant="outline" className={cn('mt-2 h-4 px-1.5 text-[9px]', statusClass(asset.approvalState))}>{asset.approvalState}</Badge>
+        <div className="mt-2 flex flex-wrap gap-1.5"><Badge variant="outline" className={cn('h-4 px-1.5 text-[9px]', statusClass(asset.approvalState))}>{asset.approvalState}</Badge><Badge variant="outline" className="h-4 px-1.5 text-[9px]">{asset.importance}</Badge></div>
+        <div className="mt-2 flex items-center justify-between text-[9px] text-muted-foreground"><span>Reference coverage</span><span className="tabular-nums">{coverage}%</span></div>
+        <Progress value={coverage} className="mt-1 h-1" />
         <div className="mt-3 flex gap-1.5">
           {asset.lockState !== 'Locked' && <Button size="xs" onClick={() => onAction(`Approve ${asset.id}`)}>Approve</Button>}
           <Button size="xs" variant="ghost" onClick={() => onAction(`Regenerate ${asset.id}`)}><RefreshCw />Version</Button>
@@ -274,6 +303,11 @@ function SequenceCard({ sequence, onAction }: { sequence: StudioSequence; onActi
           <StateBlock label="Closing state" value={sequence.closingState} />
         </div>
         <div><p className="text-[10px] font-semibold uppercase tracking-[0.14em] text-muted-foreground">Exact reference assets</p><div className="mt-2 flex flex-wrap gap-1.5">{sequence.assetIds.map((id) => <Badge key={id} variant="outline" className="font-mono text-[9px]">{id}</Badge>)}</div></div>
+        <div className="grid gap-3 text-xs sm:grid-cols-3">
+          <StateBlock label="Scene state" value={`${sequence.sceneState.locationId} · ${sequence.sceneState.environmentId}`} />
+          <StateBlock label="Scene graph" value={`${sequence.sceneGraph.nodes.length} nodes · ${sequence.sceneGraph.edges.length} relationships`} />
+          <StateBlock label="Look-ahead" value={`${sequence.lookAhead.length} future requirement${sequence.lookAhead.length === 1 ? '' : 's'}`} />
+        </div>
         <details className="rounded-xl border border-border bg-background/50 p-3">
           <summary className="cursor-pointer text-xs font-medium">Seedance prompt</summary>
           <pre className="mt-3 max-h-48 overflow-auto whitespace-pre-wrap font-mono text-[10px] leading-5 text-muted-foreground">{sequence.prompt}</pre>
@@ -282,8 +316,41 @@ function SequenceCard({ sequence, onAction }: { sequence: StudioSequence; onActi
       <div className="flex flex-wrap gap-2 border-t border-border/70 bg-background/35 px-4 py-3">
         <Button size="sm" onClick={() => onAction(`Generate Sequence ${sequence.number}`)}><Play />Generate</Button>
         {sequence.status !== 'Approved' && <Button size="sm" variant="outline" onClick={() => onAction(`Approve Sequence ${sequence.number}`)}><Check />Approve</Button>}
+        <Button size="sm" variant="ghost" onClick={() => onAction(`Show Scene State for Sequence ${sequence.number}`)}>Scene state</Button>
+        <Button size="sm" variant="ghost" onClick={() => onAction(`Show Scene Graph for Sequence ${sequence.number}`)}>Graph</Button>
         <Button size="sm" variant="ghost" onClick={copyPrompt}><Copy />Copy prompt</Button>
       </div>
+    </section>
+  );
+}
+
+function SceneIntelligenceCard({ sequence }: { sequence: StudioSequence }) {
+  const manifestGroups = Object.entries(sequence.assetManifest).filter(([, values]) => values.length > 0);
+  return (
+    <section className="mt-4 rounded-2xl border border-border bg-card/65 p-4">
+      <div className="flex items-center justify-between gap-3"><div className="flex items-center gap-2.5"><Network className="size-4 text-amber-300" /><span className="text-sm font-medium">{sequence.id} intelligence</span></div><Badge variant="outline">{sequence.sceneGraph.edges.length} relationships</Badge></div>
+      <div className="mt-4 grid gap-3 text-xs sm:grid-cols-2">
+        <StateBlock label="Scene state" value={`${sequence.sceneState.locationId} · ${sequence.sceneState.environmentId} · ${sequence.sceneState.weatherState}`} />
+        <StateBlock label="Inherited continuity" value={sequence.sceneState.previousContinuitySource} />
+        <StateBlock label="Ending state" value={`${sequence.endingState.environmentState} · ${sequence.endingState.elapsedTimeSeconds}s elapsed`} />
+        <StateBlock label="Space & direction" value={`${sequence.endingState.cameraDirection} · ${sequence.endingState.screenDirection}`} />
+      </div>
+      <div className="mt-4"><p className="text-[10px] font-semibold uppercase tracking-[0.14em] text-muted-foreground">Exact manifest</p><div className="mt-2 flex flex-wrap gap-1.5">{manifestGroups.map(([category, values]) => <Badge key={category} variant="outline" className="text-[9px]">{category} {values.length}</Badge>)}</div></div>
+      {sequence.lookAhead.length > 0 && <div className="mt-4"><RuleGroup title="Look-ahead" rules={sequence.lookAhead} /></div>}
+    </section>
+  );
+}
+
+function ReferenceCoverageCard({ assets }: { assets: StudioAsset[] }) {
+  return (
+    <section className="mt-4 rounded-2xl border border-border bg-card/65 p-4">
+      <div className="flex items-center gap-2.5"><ShieldCheck className="size-4 text-amber-300" /><span className="text-sm font-medium">Reference coverage</span></div>
+      <div className="mt-4 space-y-3">{assets.map((asset) => {
+        const entries = Object.entries(asset.referenceCoverage);
+        const coverage = Math.round(entries.reduce((total, [, value]) => total + value, 0) / entries.length);
+        const missing = entries.filter(([, value]) => value < 50).map(([key]) => key);
+        return <div key={asset.id} className="rounded-xl bg-background/55 p-3"><div className="flex items-center justify-between gap-3 text-xs"><span className="font-medium">{asset.id} · {asset.name}</span><span className="tabular-nums text-muted-foreground">{coverage}%</span></div><Progress value={coverage} className="mt-2" /><p className="mt-2 text-[10px] text-muted-foreground">{missing.length ? `Needs: ${missing.join(', ')}` : 'Coverage is production-ready.'}</p></div>;
+      })}</div>
     </section>
   );
 }
@@ -295,7 +362,7 @@ function StateBlock({ label, value }: { label: string; value: string }) {
 function ExportCard({ project, onExport }: { project: StudioProject; onExport: () => void }) {
   return (
     <section className="mt-4 flex items-center justify-between gap-4 rounded-2xl border border-border bg-card/65 p-4">
-      <div className="flex min-w-0 items-center gap-3"><span className="grid size-10 shrink-0 place-items-center rounded-xl bg-amber-300/10 text-amber-200"><FileArchive className="size-5" /></span><div className="min-w-0"><p className="text-sm font-medium">Complete production package</p><p className="mt-1 truncate text-xs text-muted-foreground">Story, Bible, assets, sequences, prompts, continuity, media and metadata</p></div></div>
+      <div className="flex min-w-0 items-center gap-3"><span className="grid size-10 shrink-0 place-items-center rounded-xl bg-amber-300/10 text-amber-200"><FileArchive className="size-5" /></span><div className="min-w-0"><p className="text-sm font-medium">{project.title} · complete production package</p><p className="mt-1 truncate text-xs text-muted-foreground">Story, World Bible, scene intelligence, prompts, continuity, media, and metadata</p></div></div>
       <Button size="sm" onClick={onExport}><Download />Download</Button>
     </section>
   );
@@ -312,9 +379,12 @@ function MessageItem({ item, project, onAction, onOpenLibrary, onExport }: { ite
         <span className="brand-mark mt-0.5 grid size-7 shrink-0 place-items-center rounded-lg"><Clapperboard className="size-3.5" /></span>
         <div className="min-w-0 flex-1"><p className="max-w-2xl text-sm leading-6 text-foreground/90">{item.content}</p>
           {item.metadata?.kind === 'story' && <StoryCard project={project} onAction={onAction} />}
+          {item.metadata?.kind === 'world' && <WorldCard project={project} onAction={onAction} />}
           {item.metadata?.kind === 'bible' && <BibleCard project={project} onAction={onAction} />}
           {item.metadata?.kind === 'assets' && <AssetsCard project={project} ids={item.metadata.assetIds} onAction={onAction} onOpenLibrary={onOpenLibrary} />}
           {item.metadata?.kind === 'sequence' && sequence && <SequenceCard sequence={sequence} onAction={onAction} />}
+          {['scene', 'graph', 'lookahead'].includes(item.metadata?.kind ?? '') && sequence && <SceneIntelligenceCard sequence={sequence} />}
+          {item.metadata?.kind === 'coverage' && <ReferenceCoverageCard assets={item.metadata.assetIds?.length ? project.assets.filter((asset) => item.metadata?.assetIds?.includes(asset.id)) : project.assets.filter((asset) => asset.importance !== 'Incidental')} />}
           {item.metadata?.kind === 'export' && <ExportCard project={project} onExport={onExport} />}
           {item.metadata?.kind === 'attachment' && <div className="mt-3 flex items-center gap-3 rounded-xl border border-border bg-card/55 p-3"><FileImage className="size-4 text-amber-200" /><span className="text-xs text-muted-foreground">Original reference stored in project memory</span></div>}
         </div>
@@ -337,11 +407,30 @@ export function StudioApp() {
   const [search, setSearch] = useState('');
   const [assetFilter, setAssetFilter] = useState('All');
   const [lightMode, setLightMode] = useState(false);
-  const [dragging, setDragging] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+
+  const startNewMovie = useCallback(() => {
+    setProject(null);
+    setMessages([]);
+    setDraft('');
+    setFiles([]);
+    setView('chat');
+    setMobileNav(false);
+    setTimeout(() => textareaRef.current?.focus(), 50);
+  }, []);
+
+  const downloadExport = useCallback((projectId = project?.id) => {
+    if (!projectId) return;
+    const anchor = document.createElement('a');
+    anchor.href = `/api/export?projectId=${encodeURIComponent(projectId)}`;
+    anchor.download = '';
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+  }, [project?.id]);
 
   const loadProject = useCallback(async (projectId: string) => {
     setBooting(true);
@@ -397,22 +486,12 @@ export function StudioApp() {
     return () => window.removeEventListener('keydown', handleShortcut);
   });
 
-  const startNewMovie = () => {
-    setProject(null);
-    setMessages([]);
-    setDraft('');
-    setFiles([]);
-    setView('chat');
-    setMobileNav(false);
-    setTimeout(() => textareaRef.current?.focus(), 50);
-  };
-
   const setCurrentView = (next: View) => {
     setView(next);
     setMobileNav(false);
   };
 
-  const uploadFiles = async (activeProject: StudioProject, selectedFiles: File[], role: string) => {
+  const uploadFiles = useCallback(async (activeProject: StudioProject, selectedFiles: File[], role: string) => {
     let nextProject = activeProject;
     const uploadedMessages: StudioMessage[] = [];
     for (const file of selectedFiles) {
@@ -428,7 +507,7 @@ export function StudioApp() {
     }
     setProject(nextProject);
     setMessages((current) => [...current, ...uploadedMessages]);
-  };
+  }, []);
 
   const submitInstruction = useCallback(async (instruction: string, selectedFiles: File[] = []) => {
     const content = instruction.trim();
@@ -459,9 +538,9 @@ export function StudioApp() {
     } finally {
       setWorking(false);
     }
-  }, [project, projects, working]);
+  }, [downloadExport, project, projects, uploadFiles, working]);
 
-  const onSubmit = (event: FormEvent) => {
+  const onSubmit = (event: { preventDefault: () => void }) => {
     event.preventDefault();
     void submitInstruction(draft, files);
   };
@@ -476,16 +555,6 @@ export function StudioApp() {
   const onAction = (message: string) => {
     setView('chat');
     void submitInstruction(message);
-  };
-
-  const downloadExport = (projectId = project?.id) => {
-    if (!projectId) return;
-    const anchor = document.createElement('a');
-    anchor.href = `/api/export?projectId=${encodeURIComponent(projectId)}`;
-    anchor.download = '';
-    document.body.appendChild(anchor);
-    anchor.click();
-    anchor.remove();
   };
 
   const updateProject = async (body: Record<string, unknown>) => {
@@ -506,8 +575,6 @@ export function StudioApp() {
     if (assetFilter === 'Needs Review') return project.assets.filter((asset) => asset.approvalState === 'Needs Review');
     return project.assets.filter((asset) => asset.category === assetFilter);
   }, [assetFilter, project]);
-
-  const activeSummary = project ? projects.find((item) => item.id === project.id) : undefined;
 
   return (
     <main className="film-grain flex h-dvh overflow-hidden bg-background text-foreground">
@@ -564,7 +631,7 @@ export function StudioApp() {
 
         {view === 'chat' && (
           <div className="pointer-events-none absolute inset-x-0 bottom-0 z-20 bg-gradient-to-t from-background via-background to-transparent px-3 pb-3 pt-16 sm:px-6 sm:pb-5">
-            <form onSubmit={onSubmit} onDragEnter={(event) => { event.preventDefault(); setDragging(true); }} onDragOver={(event) => event.preventDefault()} onDragLeave={() => setDragging(false)} onDrop={(event) => { event.preventDefault(); setDragging(false); setFiles((current) => [...current, ...Array.from(event.dataTransfer.files)]); }} className={cn('composer pointer-events-auto mx-auto w-full max-w-[780px] rounded-[20px] border bg-card p-2.5 transition', dragging && 'border-amber-300/60 ring-4 ring-amber-300/10')}>
+            <form onSubmit={onSubmit} className="composer pointer-events-auto mx-auto w-full max-w-[780px] rounded-[20px] border bg-card p-2.5 transition">
               {files.length > 0 && <div className="flex flex-wrap gap-1.5 px-2 pb-2">{files.map((file, index) => <span key={`${file.name}-${index}`} className="flex items-center gap-1.5 rounded-full border border-border bg-secondary px-2.5 py-1 text-[10px]"><Paperclip className="size-3" /><span className="max-w-40 truncate">{file.name}</span><button type="button" onClick={() => setFiles((current) => current.filter((_, itemIndex) => itemIndex !== index))} aria-label={`Remove ${file.name}`}><X className="size-3 text-muted-foreground hover:text-foreground" /></button></span>)}</div>}
               <label htmlFor="movie-idea" className="sr-only">{project ? 'Tell the studio what to do' : 'Describe your movie'}</label>
               <textarea ref={textareaRef} id="movie-idea" rows={2} value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={onComposerKeyDown} placeholder={project ? 'Ask for a change, show an asset, or continue the movie…' : 'Describe the movie you want to make…'} className="max-h-40 min-h-[54px] w-full resize-none bg-transparent px-2.5 py-2 text-[15px] leading-6 outline-none placeholder:text-muted-foreground/65" />
@@ -573,7 +640,7 @@ export function StudioApp() {
                   <input ref={fileInputRef} type="file" multiple className="sr-only" accept="image/*,video/*,audio/*,.pdf,.doc,.docx,.txt" onChange={(event) => setFiles((current) => [...current, ...Array.from(event.target.files ?? [])])} />
                   <Button type="button" variant="ghost" size="icon" className="rounded-full" onClick={() => fileInputRef.current?.click()} aria-label="Attach reference"><Paperclip className="size-[18px]" strokeWidth={1.7} /></Button>
                   <Button type="button" variant="ghost" size="icon" className="rounded-full" disabled title="Microphone input is optional and not enabled in this browser" aria-label="Microphone unavailable"><Mic className="size-[18px]" strokeWidth={1.7} /></Button>
-                  {project && <span className="ml-1 hidden text-[10px] text-muted-foreground sm:inline">Try /assets, /sequences, /status</span>}
+                  {project && <span className="ml-1 hidden text-[10px] text-muted-foreground sm:inline">Try /world, /assets, /scene 1, /status</span>}
                 </div>
                 <Button type="submit" size="icon" disabled={working || (!draft.trim() && files.length === 0)} className="size-9 rounded-full" aria-label="Send instruction">{working ? <LoaderCircle className="animate-spin" /> : <ArrowUp className="size-[18px]" strokeWidth={2} />}</Button>
               </div>
