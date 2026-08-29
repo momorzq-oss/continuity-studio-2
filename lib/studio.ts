@@ -11,6 +11,8 @@ export type SequenceStatus =
 
 export interface StudioAsset {
   id: string;
+  projectNumber: number;
+  generatedFileName: string;
   name: string;
   category: string;
   description: string;
@@ -194,6 +196,7 @@ export interface AssetStateEvent {
   id: string;
   sequenceNumber: number;
   assetId: string;
+  assetNumber: number;
   eventType: string;
   previousState: string;
   nextState: string;
@@ -212,6 +215,8 @@ export interface StudioSequence {
   location: string;
   timeOfDay: string;
   assetIds: string[];
+  assetNumbers: number[];
+  assetFiles: string[];
   openingState: string;
   closingState: string;
   continuitySource: string;
@@ -249,7 +254,7 @@ export interface StudioMessage {
   content: string;
   createdAt: string;
   metadata?: {
-    kind?: 'story' | 'bible' | 'world' | 'assets' | 'sequence' | 'scene' | 'graph' | 'coverage' | 'lookahead' | 'status' | 'export' | 'attachment' | 'note';
+    kind?: 'story' | 'bible' | 'world' | 'assets' | 'sequence' | 'scene' | 'graph' | 'coverage' | 'lookahead' | 'status' | 'export' | 'flat-assets' | 'attachment' | 'note';
     sequenceNumber?: number;
     assetIds?: string[];
   };
@@ -259,6 +264,7 @@ export interface ContinuityEvent {
   id: string;
   sequenceNumber: number;
   assetId: string;
+  assetNumber: number;
   field: string;
   previousValue: string;
   nextValue: string;
@@ -317,6 +323,13 @@ export interface StudioProject {
   locations: WorldLocation[];
   environments: EnvironmentState[];
   assets: StudioAsset[];
+  flatAssetFolder: {
+    rule: 'SINGLE FLAT ASSET FOLDER RULE';
+    folderName: string;
+    nextUnusedNumber: number;
+    namingFormat: 'NNN_NAME_GENERATED.png';
+    subfoldersAllowed: false;
+  };
   sequences: StudioSequence[];
   continuity: {
     status: string;
@@ -336,6 +349,7 @@ export interface StudioProject {
     createdAt: string;
     referenceRoles: string[];
     linkedAssetId?: string;
+    linkedAssetNumber?: number;
   }>;
   settings: {
     automaticMode: boolean;
@@ -381,6 +395,26 @@ function uid(prefix: string) {
 
 export function nowIso() {
   return new Date().toISOString();
+}
+
+export function formatAssetNumber(value: number) {
+  return String(Math.max(0, Math.trunc(value))).padStart(3, '0');
+}
+
+function filenamePart(value: string) {
+  return value.normalize('NFKD').replace(/[^a-zA-Z0-9]+/g, '_').replace(/_+/g, '_').replace(/^_|_$/g, '').toUpperCase() || 'ASSET';
+}
+
+export function numberedAssetFileName(asset: Pick<StudioAsset, 'projectNumber' | 'name'>) {
+  return `${formatAssetNumber(asset.projectNumber)}_${filenamePart(asset.name)}_GENERATED.png`;
+}
+
+export function assetProductionReference(asset: Pick<StudioAsset, 'projectNumber' | 'name' | 'generatedFileName'>) {
+  return `Asset ${formatAssetNumber(asset.projectNumber)} · ${asset.name} · ${asset.generatedFileName}`;
+}
+
+export function flatAssetFolderName(title: string) {
+  return `${filenamePart(title)}_ASSETS`;
 }
 
 export function inferDurationSeconds(text: string, fallback = 180) {
@@ -478,7 +512,7 @@ function makeAssets(idea: string, sequenceCount: number, setting: string): Studi
   const lower = idea.toLowerCase();
   const allSequences = Array.from({ length: sequenceCount }, (_, i) => i + 1);
   const protagonist = /traveller|traveler/.test(lower) ? 'The Traveller' : 'Protagonist';
-  const assets: StudioAsset[] = [
+  const assets: Array<Omit<StudioAsset, 'projectNumber' | 'generatedFileName'>> = [
     {
       id: 'CHARACTER_001',
       ...makeAssetIntelligence('CHARACTER_001', 'Story critical', 'Characters'),
@@ -615,7 +649,10 @@ function makeAssets(idea: string, sequenceCount: number, setting: string): Studi
     storyPurpose: 'Locks the protagonist’s silhouette and temporal condition.', sequences: allSequences, approvalState: 'Pending', lockState: 'Unlocked', version: 1, referenceCount: 0, notes: '',
     continuityConstraints: ['Track head covering, dust, tears, wetness, and blood'],
   });
-  return assets;
+  return assets.map((asset, index) => {
+    const projectNumber = index + 1;
+    return { ...asset, projectNumber, generatedFileName: numberedAssetFileName({ projectNumber, name: asset.name }) };
+  });
 }
 
 function makeWorldBible(input: {
@@ -645,7 +682,13 @@ function makeWorldBible(input: {
     vegetation: /desert/.test(lower) ? ['Sparse native arid vegetation only'] : ['Vegetation must match geography and climate'],
     transportation: historical ? [`Only transport plausible in ${input.period} and ${input.region}`] : ['Transportation must be introduced and tracked as an asset'],
     wardrobeRules: [historical ? `All wardrobe, footwear, headwear, jewellery, and accessories must be plausible for ${input.period}` : 'Wardrobe follows character, culture, climate, and story role', 'Costume changes never create a new character identity'],
-    objectRules: ['Every story-critical or recurring object receives a stable ID', 'Owner, holder, location, condition, activation, visibility, damage, and transformation persist'],
+    objectRules: [
+      'SINGLE FLAT ASSET FOLDER RULE: every approved generated visual production asset lives in one project asset folder with no subfolders.',
+      'Use one permanent project-wide numeric sequence across all categories. Never restart numbers, renumber replacements, or move another asset number.',
+      'Generated filenames begin NNN_NAME_GENERATED.png, and the same NNN is the primary production reference in chat, cards, lists, sequence plans, prompts, references, continuity, downloads, and exports.',
+      'Every story-critical or recurring object receives a stable internal ID behind its permanent numeric production reference.',
+      'Owner, holder, location, condition, activation, visibility, damage, and transformation persist',
+    ],
     weaponRules: ['Weapons never appear unless present in the manifest', 'Weapon owner, holder, activation, ammunition, and damage are explicit states'],
     languageRules: ['Dialogue language and dialect follow the approved Film Bible and character background'],
     visualRules: [input.visualStyle, 'No visual element may conflict with geography, period, culture, technology, or established architecture'],
@@ -792,7 +835,7 @@ function makeSceneIntelligence(
   const endingEnvironment = environmentSnapshotAtSequence(project.environments.find((environment) => environment.id === environmentId), project.stateEvents, sequence.number, 'ending');
   const nodes: SceneGraphNode[] = [
     { id: sequence.id, kind: 'Sequence', label: sequence.id, state: sequence.status },
-    ...openingAssets.map((asset) => ({ id: asset.id, kind: asset.category, label: asset.name, state: `${asset.currentState.condition}; ${asset.currentState.currentLocation}` })),
+    ...openingAssets.map((asset) => ({ id: asset.id, kind: asset.category, label: `Asset ${formatAssetNumber(asset.projectNumber)} · ${asset.name}`, state: `${asset.currentState.condition}; ${asset.currentState.currentLocation}` })),
     { id: environmentId, kind: 'Environment', label: environmentId, state: sequence.timeOfDay },
   ];
   const edges: SceneGraphEdge[] = [];
@@ -846,7 +889,7 @@ function makeSceneIntelligence(
 
 function makeKnowledgeGraph(project: Pick<StudioProject, 'assets' | 'locations' | 'environments' | 'sequences'>) {
   const nodes: SceneGraphNode[] = [
-    ...project.assets.map((asset) => ({ id: asset.id, kind: asset.category, label: asset.name, state: `${asset.currentState.condition}; V${asset.version}` })),
+    ...project.assets.map((asset) => ({ id: asset.id, kind: asset.category, label: `Asset ${formatAssetNumber(asset.projectNumber)} · ${asset.name}`, state: `${asset.currentState.condition}; V${asset.version}` })),
     ...project.sequences.map((sequence) => ({ id: sequence.id, kind: 'Sequence', label: sequence.title, state: sequence.status })),
   ];
   const edges: SceneGraphEdge[] = project.sequences.flatMap((sequence) => sequence.sceneGraph.edges);
@@ -868,7 +911,7 @@ function buildPrompt(
     `${sequence.id} — ${sequence.duration} seconds`,
     `Format: ${project.aspectRatio}, ${project.resolution}. Generation mode: reference-led cinematic sequence.`,
     `Continuity source: ${sequence.continuitySource}.`,
-    `Reference assets: ${sequence.assetIds.join(', ')}. Use exactly these identities and no unplanned recurring elements.`,
+    `Reference assets by permanent project number: ${sequence.assetFiles.map((file, index) => `Asset ${formatAssetNumber(sequence.assetNumbers[index])} = ${file}`).join('; ')}. Attach exactly these numbered files and no unplanned recurring elements.`,
     `Opening frame: ${sequence.openingState}.`,
     `Location/time: ${sequence.location}; ${sequence.timeOfDay}.`,
     `Visual direction: ${project.visualStyle}. Camera: ${project.cameraStyle}. Lens: ${project.lensDirection}.`,
@@ -889,7 +932,8 @@ function makeSequences(project: Omit<StudioProject, 'sequences'>): StudioSequenc
     const duration = Math.min(project.sequenceDurationSeconds, remaining);
     remaining -= duration;
     const title = beats[Math.min(Math.floor((index / Math.max(1, project.sequenceCount - 1)) * (beats.length - 1)), beats.length - 1)];
-    const relevantAssets = project.assets.filter((asset) => asset.sequences.includes(number)).map((asset) => asset.id);
+    const relevantAssetRecords = project.assets.filter((asset) => asset.sequences.includes(number)).sort((a, b) => a.projectNumber - b.projectNumber);
+    const relevantAssets = relevantAssetRecords.map((asset) => asset.id);
     const openingState = number === 1 ? `Establish ${project.story.protagonist} and the untouched world.` : `Inherit the approved closing state of SEQUENCE_${String(number - 1).padStart(3, '0')}.`;
     const closingState = number === project.sequenceCount ? `Resolve the immediate conflict and hold the final emotional image.` : `End on a specific physical and emotional change that motivates Sequence ${number + 1}.`;
     const sequenceBase: Omit<StudioSequence, 'prompt' | 'assetManifest' | 'sceneState' | 'sceneGraph' | 'endingState' | 'lookAhead'> = {
@@ -901,6 +945,8 @@ function makeSequences(project: Omit<StudioProject, 'sequences'>): StudioSequenc
       location: number > Math.floor(project.sequenceCount / 3) && project.assets.some((asset) => asset.id === 'LOCATION_002') ? 'LOCATION_002 — The Strange Camp' : 'LOCATION_001 — Primary story location',
       timeOfDay: /night|dark/i.test(project.idea) ? 'Night' : 'Story-defined progression',
       assetIds: relevantAssets,
+      assetNumbers: relevantAssetRecords.map((asset) => asset.projectNumber),
+      assetFiles: relevantAssetRecords.map((asset) => asset.generatedFileName),
       openingState,
       closingState,
       continuitySource: number === 1 ? 'Film Bible and approved reference assets' : `Approved ending state of SEQUENCE_${String(number - 1).padStart(3, '0')}`,
@@ -910,10 +956,10 @@ function makeSequences(project: Omit<StudioProject, 'sequences'>): StudioSequenc
     const intelligence = makeSceneIntelligence(project, sequenceBase);
     const futureAssets = project.assets
       .filter((asset) => asset.sequences.some((usedIn) => usedIn > number) && !asset.sequences.includes(number))
-      .map((asset) => `${asset.id} · ${asset.name} first needed in Sequence ${Math.min(...asset.sequences)}`);
+      .map((asset) => `${assetProductionReference(asset)} first needed in Sequence ${Math.min(...asset.sequences)}`);
     sequences.push({
       ...sequenceBase,
-      prompt: `${buildPrompt(project, sequenceBase)}\nScene State: location ${intelligence.sceneState.locationId}; environment ${intelligence.sceneState.environmentId}; weather ${intelligence.sceneState.weatherState}; lighting ${intelligence.sceneState.lightingState}; screen direction ${intelligence.sceneState.screenDirection}.\nSequence Asset Manifest: ${Object.entries(intelligence.manifest).map(([category, values]) => `${category}=[${values.join(', ')}]`).join('; ')}.\nScene Graph relationships: ${intelligence.sceneGraph.edges.map((edge) => `${edge.from} ${edge.relationship} ${edge.to}`).join('; ')}.\nStructured Ending State: preserve character positions, directions, conditions, wardrobe, held and dropped objects, animal/creature/vehicle/prop states, environment, damage, lighting, weather, effects, time, and sound for the following sequence.`,
+      prompt: `${buildPrompt(project, sequenceBase)}\nScene State: location ${intelligence.sceneState.locationId}; environment ${intelligence.sceneState.environmentId}; weather ${intelligence.sceneState.weatherState}; lighting ${intelligence.sceneState.lightingState}; screen direction ${intelligence.sceneState.screenDirection}.\nSequence Asset Manifest: ${Object.entries(intelligence.manifest).map(([category, values]) => `${category}=[${values.map((value) => { const asset = project.assets.find((item) => item.id === value); return asset ? `Asset ${formatAssetNumber(asset.projectNumber)} (${asset.generatedFileName})` : value; }).join(', ')}]`).join('; ')}.\nScene Graph relationships: ${intelligence.sceneGraph.edges.map((edge) => `${edge.from} ${edge.relationship} ${edge.to}`).join('; ')}.\nStructured Ending State: preserve character positions, directions, conditions, wardrobe, held and dropped objects, animal/creature/vehicle/prop states, environment, damage, lighting, weather, effects, time, and sound for the following sequence.`,
       assetManifest: intelligence.manifest,
       sceneState: intelligence.sceneState,
       sceneGraph: intelligence.sceneGraph,
@@ -952,7 +998,7 @@ export function createProjectFromIdea(idea: string): StudioProject {
     characterRules: ['One stable identity per character asset ID.', 'Wardrobe, position, injuries, dirt, wetness, and held objects carry forward.'],
     visualRules: ['Grounded cinematic realism with restrained stylization.', 'Motivated camera movement; no decorative coverage that breaks geography.'],
     soundRules: ['Preserve environmental perspective.', 'No music or subtitles unless the user adds them to the Film Bible.'],
-    continuityRules: ['Every approved closing state becomes the next expected opening state.', 'Exact stable asset IDs must be listed in every sequence.'],
+    continuityRules: ['Every approved closing state becomes the next expected opening state.', 'Every sequence lists exact permanent asset numbers and their matching NNN_NAME_GENERATED.png files. Internal stable IDs remain secondary implementation keys.'],
     negativeRules: ['No duplicate identities.', 'No unplanned people, props, animals, vehicles, creatures, or locations.', 'No unexplained costume, light, weather, or screen-direction changes.'],
   };
   const visualStyle = genre === 'Horror' ? 'Grounded atmospheric realism with controlled shadows and tactile texture' : 'Grounded cinematic realism with coherent production design';
@@ -970,12 +1016,20 @@ export function createProjectFromIdea(idea: string): StudioProject {
     locations: [],
     environments: [],
     assets: [] as StudioAsset[], continuity: { status: 'Not started', events: [] as ContinuityEvent[] },
+    flatAssetFolder: {
+      rule: 'SINGLE FLAT ASSET FOLDER RULE',
+      folderName: flatAssetFolderName(title),
+      nextUnusedNumber: 1,
+      namingFormat: 'NNN_NAME_GENERATED.png',
+      subfoldersAllowed: false,
+    },
     knowledgeGraph: { nodes: [], edges: [] },
     stateEvents: [],
     stage: 'Story' as const, currentSequence: 1, exportStatus: 'Not exported', attachments: [],
     settings: { automaticMode: true, imageProvider: 'Not connected', videoProvider: 'Seedance prompt adapter', defaultAspectRatio: '16:9', defaultResolution: '4K', privacyMode: true },
   };
   projectBase.assets = makeAssets(idea, sequenceCount, setting);
+  projectBase.flatAssetFolder.nextUnusedNumber = projectBase.assets.length + 1;
   projectBase.locations = makeLocations(projectBase);
   projectBase.environments = makeEnvironments(projectBase);
   const project: StudioProject = { ...projectBase, sequences: makeSequences(projectBase) };
@@ -996,9 +1050,29 @@ export function normalizeProject(project: StudioProject): StudioProject {
     visualStyle: fallbackVisualStyle,
     lightingDirection: fallbackLighting,
   });
+  const flatRule = 'SINGLE FLAT ASSET FOLDER RULE: every approved generated visual production asset lives in one project asset folder with no subfolders.';
+  if (!next.worldBible.objectRules.includes(flatRule)) {
+    next.worldBible.objectRules = [
+      flatRule,
+      'Use one permanent project-wide numeric sequence across all categories. Never restart numbers, renumber replacements, or move another asset number.',
+      'Generated filenames begin NNN_NAME_GENERATED.png, and the same NNN is the primary production reference in chat, cards, lists, sequence plans, prompts, references, continuity, downloads, and exports.',
+      ...next.worldBible.objectRules,
+    ];
+  }
   const inferredAssets = makeAssets(next.idea, next.sequenceCount, next.setting);
   const existingAssetIds = new Set((next.assets ?? []).map((asset) => asset.id));
-  next.assets = [...(next.assets ?? []), ...inferredAssets.filter((asset) => !existingAssetIds.has(asset.id))].map((asset) => {
+  const combinedAssets = [...(next.assets ?? []), ...inferredAssets.filter((asset) => !existingAssetIds.has(asset.id))];
+  const reservedNumbers = new Set((next.assets ?? []).map((asset) => asset.projectNumber).filter((value) => Number.isInteger(value) && value > 0));
+  const assignedNumbers = new Set<number>();
+  let nextNumber = Math.max(0, ...reservedNumbers) + 1;
+  next.assets = combinedAssets.map((asset) => {
+    let projectNumber = existingAssetIds.has(asset.id) && Number.isInteger(asset.projectNumber) && asset.projectNumber > 0 && !assignedNumbers.has(asset.projectNumber) ? asset.projectNumber : 0;
+    if (!projectNumber) {
+      while (reservedNumbers.has(nextNumber) || assignedNumbers.has(nextNumber)) nextNumber += 1;
+      projectNumber = nextNumber;
+      nextNumber += 1;
+    }
+    assignedNumbers.add(projectNumber);
     const importance: StudioAsset['importance'] = asset.importance
       ?? (asset.id === 'CHARACTER_001' || asset.category === 'Creatures' || asset.category === 'Weapons' ? 'Story critical'
         : ['Locations', 'Interiors'].includes(asset.category) ? 'Location anchor'
@@ -1008,6 +1082,8 @@ export function normalizeProject(project: StudioProject): StudioProject {
     return {
       ...defaults,
       ...asset,
+      projectNumber,
+      generatedFileName: numberedAssetFileName({ projectNumber, name: asset.name }),
       importance,
       referenceDepth: asset.referenceDepth ?? defaults.referenceDepth,
       permanentIdentity: asset.permanentIdentity ?? asset.id,
@@ -1021,12 +1097,24 @@ export function normalizeProject(project: StudioProject): StudioProject {
       currentState: { ...defaults.currentState, ...asset.currentState },
     };
   });
+  next.assets.sort((a, b) => a.projectNumber - b.projectNumber);
+  const highestAssetNumber = Math.max(0, ...next.assets.map((asset) => asset.projectNumber));
+  next.flatAssetFolder = {
+    rule: 'SINGLE FLAT ASSET FOLDER RULE',
+    folderName: flatAssetFolderName(next.title),
+    nextUnusedNumber: highestAssetNumber + 1,
+    namingFormat: 'NNN_NAME_GENERATED.png',
+    subfoldersAllowed: false,
+  };
   next.locations = next.locations?.length ? next.locations : makeLocations(next);
   next.environments = next.environments?.length ? next.environments : makeEnvironments(next);
-  next.stateEvents ??= [];
+  const assetNumbers = new Map(next.assets.map((asset) => [asset.id, asset.projectNumber]));
+  next.stateEvents = (next.stateEvents ?? []).map((event) => ({ ...event, assetNumber: event.assetNumber ?? assetNumbers.get(event.assetId) ?? 0 }));
+  next.continuity.events = (next.continuity.events ?? []).map((event) => ({ ...event, assetNumber: event.assetNumber ?? assetNumbers.get(event.assetId) ?? 0 }));
   next.attachments = (next.attachments ?? []).map((attachment) => ({
     ...attachment,
     referenceRoles: attachment.referenceRoles ?? [attachment.role ?? 'Production reference'],
+    linkedAssetNumber: attachment.linkedAssetNumber ?? (attachment.linkedAssetId ? assetNumbers.get(attachment.linkedAssetId) : undefined),
   }));
   const previousSequences = new Map((next.sequences ?? []).map((sequence) => [sequence.id, sequence]));
   const regenerated = makeSequences({ ...next, sequences: undefined } as unknown as Omit<StudioProject, 'sequences'>);
@@ -1084,6 +1172,11 @@ function rebuildSequences(project: StudioProject, durationSeconds: number) {
 
 function findAsset(project: StudioProject, text: string) {
   const lower = text.toLowerCase();
+  const numericReference = lower.match(/\basset\s*0*(\d+)\b/)?.[1] ?? lower.match(/(?:^|\s)0*(\d{3})_[a-z0-9_]+_generated(?:\.png)?\b/)?.[1];
+  if (numericReference) {
+    const byNumber = project.assets.find((asset) => asset.projectNumber === Number(numericReference));
+    if (byNumber) return byNumber;
+  }
   const explicitId = lower.match(/(character|creature|animal|location|interior|environment|vehicle|prop|weapon|costume|furniture|mechanical|effect|lighting)[ _-]?(\d+)/)?.slice(1);
   if (explicitId) {
     const stable = `${explicitId[0].toUpperCase()}_${String(Number(explicitId[1])).padStart(3, '0')}`;
@@ -1096,7 +1189,7 @@ function message(content: string, metadata?: StudioMessage['metadata']): StudioM
   return { id: uid('message'), role: 'assistant', content, createdAt: nowIso(), metadata };
 }
 
-export function interpretStudioMessage(project: StudioProject, input: string): { project: StudioProject; response: StudioMessage; sideEffect?: 'export' } {
+export function interpretStudioMessage(project: StudioProject, input: string): { project: StudioProject; response: StudioMessage; sideEffect?: 'export' | 'asset-export' } {
   const next = normalizeProject(project);
   const lower = input.trim().toLowerCase();
   next.updatedAt = nowIso();
@@ -1136,16 +1229,63 @@ export function interpretStudioMessage(project: StudioProject, input: string): {
       return { project: next, response: message('The main character asset is not in the current manifest. I kept the instruction and marked the story for review.', { kind: 'note' }) };
     }
     if (mainCharacter.referenceCount === 0) {
-      return { project: next, response: message(`Attach one or more clear images here. I’ll store the originals under ${mainCharacter.id}, build the identity profile, and keep the likeness locked across every sequence.`, { kind: 'assets', assetIds: [mainCharacter.id] }) };
+      return { project: next, response: message(`Attach one or more clear images here for ${assetProductionReference(mainCharacter)}. I’ll keep every source under that one permanent number and lock the likeness across every sequence.`, { kind: 'assets', assetIds: [mainCharacter.id] }) };
     }
     mainCharacter.approvalState = 'Needs Review';
     mainCharacter.notes = `${mainCharacter.referenceCount} likeness reference${mainCharacter.referenceCount === 1 ? '' : 's'} attached; character sheet approval is pending.`;
-    return { project: next, response: message(`${mainCharacter.referenceCount} reference image${mainCharacter.referenceCount === 1 ? ' is' : 's are'} attached to one identity, ${mainCharacter.id}. Coverage is tracked by face, profile, body, rear, costume, material, and continuity role without creating duplicate people.`, { kind: 'coverage', assetIds: [mainCharacter.id] }) };
+    return { project: next, response: message(`${mainCharacter.referenceCount} reference image${mainCharacter.referenceCount === 1 ? ' is' : 's are'} attached to one identity: ${assetProductionReference(mainCharacter)}. Coverage is tracked by face, profile, body, rear, costume, material, and continuity role without creating duplicate people or numbers.`, { kind: 'coverage', assetIds: [mainCharacter.id] }) };
   }
   if (/approve all assets|lock all assets/.test(lower)) {
     next.assets = next.assets.map((asset) => ({ ...asset, approvalState: 'Locked', lockState: 'Locked' }));
     next.stage = 'Sequences';
     return { project: next, response: message(`All ${next.assets.length} assets are approved and locked. The ${next.sequenceCount}-sequence plan is ready for review.`, { kind: 'sequence', sequenceNumber: 1 }) };
+  }
+
+  const newAssetMatch = lower.match(/\b(?:add|create|introduce)\s+(?:a|an)?\s*(?:new\s+)?(character|costume|creature|animal|environment|location|interior|prop|vehicle|weapon|transformation|mechanical|damage)(?:\s+asset|\s+sheet)?\b/);
+  if (newAssetMatch) {
+    const key = newAssetMatch[1];
+    const categories: Record<string, { category: string; prefix: string }> = {
+      character: { category: 'Characters', prefix: 'CHARACTER' }, costume: { category: 'Costumes', prefix: 'COSTUME' },
+      creature: { category: 'Creatures', prefix: 'CREATURE' }, animal: { category: 'Animals', prefix: 'ANIMAL' },
+      environment: { category: 'Environment States', prefix: 'ENVIRONMENT' }, location: { category: 'Locations', prefix: 'LOCATION' },
+      interior: { category: 'Interiors', prefix: 'INTERIOR' }, prop: { category: 'Props', prefix: 'PROP' },
+      vehicle: { category: 'Vehicles', prefix: 'VEHICLE' }, weapon: { category: 'Weapons', prefix: 'WEAPON' },
+      transformation: { category: 'Transformation Sheets', prefix: 'TRANSFORMATION' }, mechanical: { category: 'Mechanical Systems', prefix: 'MECHANICAL' },
+      damage: { category: 'Damage Sheets', prefix: 'DAMAGE' },
+    };
+    const descriptor = categories[key];
+    const stableIndex = Math.max(0, ...next.assets.filter((item) => item.id.startsWith(`${descriptor.prefix}_`)).map((item) => Number(item.id.split('_').at(-1)) || 0)) + 1;
+    const id = `${descriptor.prefix}_${String(stableIndex).padStart(3, '0')}`;
+    const requestedName = input.match(/\b(?:called|named)\s+["“]?([^"”.,]+?)(?:\s+(?:for|in)\s+sequence\s+\d+|$)/i)?.[1]?.trim();
+    const name = requestedName || `${key[0].toUpperCase()}${key.slice(1)} ${stableIndex}`;
+    const mentionedSequence = Number(lower.match(/sequence\s*(\d+)/)?.[1] ?? 0);
+    const sequences = mentionedSequence > 0 && mentionedSequence <= next.sequenceCount
+      ? [mentionedSequence]
+      : Array.from({ length: next.sequenceCount }, (_, index) => index + 1);
+    const projectNumber = next.flatAssetFolder.nextUnusedNumber;
+    const created: StudioAsset = {
+      id,
+      projectNumber,
+      generatedFileName: numberedAssetFileName({ projectNumber, name }),
+      name,
+      category: descriptor.category,
+      description: `New ${descriptor.category.toLowerCase()} production asset introduced through project chat.`,
+      storyPurpose: 'User-directed production requirement.',
+      sequences,
+      approvalState: 'Pending', lockState: 'Unlocked', version: 1, referenceCount: 0,
+      notes: 'Permanent project number assigned at creation. This number is never reused or changed.',
+      continuityConstraints: ['Keep this permanent asset number across regeneration, replacement, prompts, continuity, and export'],
+      ...makeAssetIntelligence(id, ['Characters', 'Locations', 'Interiors', 'Weapons', 'Transformation Sheets'].includes(descriptor.category) ? 'Story critical' : 'Recurring', descriptor.category),
+    };
+    next.assets.push(created);
+    next.assets.sort((a, b) => a.projectNumber - b.projectNumber);
+    next.flatAssetFolder.nextUnusedNumber = projectNumber + 1;
+    next.locations = makeLocations(next);
+    next.environments = makeEnvironments(next);
+    next.sequences = makeSequences(next);
+    next.knowledgeGraph = makeKnowledgeGraph(next);
+    next.stage = 'Assets';
+    return { project: next, response: message(`${assetProductionReference(created)} is now the next permanent production asset. No existing number changed, and every sequence, prompt, continuity record, and export will use Asset ${formatAssetNumber(projectNumber)}.`, { kind: 'assets', assetIds: [created.id] }) };
   }
 
   const asset = findAsset(next, input);
@@ -1154,13 +1294,13 @@ export function interpretStudioMessage(project: StudioProject, input: string): {
     asset.lockState = 'Locked';
     const remaining = next.assets.filter((item) => item.approvalState !== 'Locked' && item.approvalState !== 'Approved').length;
     if (remaining === 0) next.stage = 'Sequences';
-    return { project: next, response: message(`${asset.name} (${asset.id}) is approved and identity-locked. ${remaining ? `${remaining} assets still need review.` : 'All required assets are now ready.'}`, { kind: 'assets', assetIds: [asset.id] }) };
+    return { project: next, response: message(`${assetProductionReference(asset)} is approved and identity-locked. ${remaining ? `${remaining} assets still need review.` : 'All required assets are now ready.'}`, { kind: 'assets', assetIds: [asset.id] }) };
   }
   if (asset && /regenerate|new version|try again/.test(lower)) {
     asset.version += 1;
     asset.approvalState = 'Pending';
     asset.lockState = 'Unlocked';
-    return { project: next, response: message(`I created ${asset.id} version ${asset.version} as a new pending version. The previously approved version is preserved and can be restored at any time.`, { kind: 'assets', assetIds: [asset.id] }) };
+    return { project: next, response: message(`I created version ${asset.version} for ${assetProductionReference(asset)}. Its permanent number and filename stay fixed; no other asset number moves. The previously approved version is preserved.`, { kind: 'assets', assetIds: [asset.id] }) };
   }
   if (asset && /reference coverage|coverage|what references|missing views/.test(lower)) {
     const coverage = asset.referenceCoverage;
@@ -1170,7 +1310,7 @@ export function interpretStudioMessage(project: StudioProject, input: string): {
     return {
       project: next,
       response: message(
-        `${asset.name} (${asset.id}) has ${asset.referenceCount} stored reference${asset.referenceCount === 1 ? '' : 's'}. ${significantRisk ? `The highest-risk missing coverage is ${missing.slice(0, 4).join(', ')}.` : 'Current gaps do not automatically block production; I’ll ask only when a gap creates real continuity risk.'}`,
+        `${assetProductionReference(asset)} has ${asset.referenceCount} stored reference${asset.referenceCount === 1 ? '' : 's'}. ${significantRisk ? `The highest-risk missing coverage is ${missing.slice(0, 4).join(', ')}.` : 'Current gaps do not automatically block production; I’ll ask only when a gap creates real continuity risk.'}`,
         { kind: 'coverage', assetIds: [asset.id] },
       ),
     };
@@ -1178,18 +1318,18 @@ export function interpretStudioMessage(project: StudioProject, input: string): {
 
   if (/show (?:me )?(?:all )?characters|\/characters/.test(lower)) {
     const characters = next.assets.filter((item) => item.category === 'Characters');
-    return { project: next, response: message(`${characters.length} character${characters.length === 1 ? '' : 's'} in this movie: ${characters.map((item) => `${item.name} (${item.id})`).join(', ')}.`, { kind: 'assets', assetIds: characters.map((item) => item.id) }) };
+    return { project: next, response: message(`${characters.length} character${characters.length === 1 ? '' : 's'} in this movie: ${characters.map(assetProductionReference).join(', ')}.`, { kind: 'assets', assetIds: characters.map((item) => item.id) }) };
   }
   if (/show (?:me )?(?:all )?locations|\/locations/.test(lower)) {
     const locations = next.assets.filter((item) => ['Locations', 'Interiors'].includes(item.category));
-    return { project: next, response: message(`${locations.length} location asset${locations.length === 1 ? '' : 's'}: ${locations.map((item) => `${item.name} (${item.id})`).join(', ')}.`, { kind: 'assets', assetIds: locations.map((item) => item.id) }) };
+    return { project: next, response: message(`${locations.length} location asset${locations.length === 1 ? '' : 's'}: ${locations.map(assetProductionReference).join(', ')}.`, { kind: 'assets', assetIds: locations.map((item) => item.id) }) };
   }
   if (/show (?:me )?(?:all )?environments|environment states|weather states/.test(lower)) {
     return { project: next, response: message(`${next.environments.length} environment state${next.environments.length === 1 ? '' : 's'} are separated from permanent location identity. They track weather, atmosphere, wind, visibility, surfaces, vegetation, fire, water, debris, tracks, lighting, time, and physical sound sources.`, { kind: 'world' }) };
   }
   if (/show (?:me )?(?:all )?assets|how many assets|asset manifest|\/assets/.test(lower)) {
     const counts = Object.entries(next.assets.reduce<Record<string, number>>((acc, item) => { acc[item.category] = (acc[item.category] ?? 0) + 1; return acc; }, {}));
-    return { project: next, response: message(`${next.assets.length} total assets: ${counts.map(([category, count]) => `${count} ${category.toLowerCase()}`).join(', ')}.`, { kind: 'assets', assetIds: next.assets.map((item) => item.id) }) };
+    return { project: next, response: message(`${next.assets.length} permanently numbered assets in ${next.flatAssetFolder.folderName}, from Asset ${formatAssetNumber(next.assets[0]?.projectNumber ?? 0)} through Asset ${formatAssetNumber(next.assets.at(-1)?.projectNumber ?? 0)}: ${counts.map(([category, count]) => `${count} ${category.toLowerCase()}`).join(', ')}. All categories share this one sequence.`, { kind: 'assets', assetIds: next.assets.map((item) => item.id) }) };
   }
   if (/missing asset|production risk|what.*need|look ahead|future asset/.test(lower)) {
     const critical = next.assets.filter((item) => item.importance === 'Story critical' || item.importance === 'Location anchor');
@@ -1225,6 +1365,7 @@ export function interpretStudioMessage(project: StudioProject, input: string): {
     }
     const event: ContinuityEvent = {
       id: uid('continuity'), sequenceNumber: sequence.number, assetId: next.assets[0]?.id ?? 'PROJECT', field: 'sequence boundary',
+      assetNumber: next.assets[0]?.projectNumber ?? 0,
       previousValue: sequence.openingState, nextValue: sequence.closingState, reason: 'Approved sequence closing state', createdAt: nowIso(),
     };
     next.continuity.events.push(event);
@@ -1244,10 +1385,10 @@ export function interpretStudioMessage(project: StudioProject, input: string): {
     return { project: next, response: message(`${sequence.id} passed its dependency check. World rules, Scene State, Scene Graph, exact sequence manifest, reference coverage, continuity source, and structured Ending State are resolved. Connect a video provider in Settings to start the generation job.`, { kind: 'scene', sequenceNumber: sequence.number }) };
   }
   if (sequence && /(show|prompt|seedance)/.test(lower)) {
-    return { project: next, response: message(`${sequence.id} is ${sequence.status.toLowerCase()}. It uses ${sequence.assetIds.join(', ')} and inherits continuity from ${sequence.continuitySource}.`, { kind: 'sequence', sequenceNumber: sequence.number }) };
+    return { project: next, response: message(`${sequence.id} is ${sequence.status.toLowerCase()}. Attach ${sequence.assetFiles.map((file, index) => `Asset ${formatAssetNumber(sequence.assetNumbers[index])} (${file})`).join(', ')}. It inherits continuity from ${sequence.continuitySource}.`, { kind: 'sequence', sequenceNumber: sequence.number }) };
   }
   if (/show (?:me )?(?:all )?sequences|sequence plan|\/sequences/.test(lower)) {
-    return { project: next, response: message(`${next.sequenceCount} sequences total. Each planned sequence stores exact asset IDs, opening and closing states, a continuity source, and a production-ready Seedance prompt.`, { kind: 'sequence', sequenceNumber: next.currentSequence }) };
+    return { project: next, response: message(`${next.sequenceCount} sequences total. Each planned sequence stores exact permanent asset numbers, matching flat-folder filenames, opening and closing states, a continuity source, and a production-ready Seedance prompt.`, { kind: 'sequence', sequenceNumber: next.currentSequence }) };
   }
 
   if (asset && sequenceNumber > 0 && /pick(?:ed)? up|put down|carry|carried|pass(?:ed)?|throw|thrown|drop(?:ped)?|lost|found|open(?:ed)?|close(?:d)?|activate(?:d)?|deactivate(?:d)?|hidden|revealed|move(?:d)?/.test(lower)) {
@@ -1266,14 +1407,14 @@ export function interpretStudioMessage(project: StudioProject, input: string): {
     const locationId = next.sequences.find((item) => item.number === sequenceNumber)?.sceneState.locationId ?? asset.currentState.currentLocation;
     asset.currentState.currentLocation = locationId;
     const event: AssetStateEvent = {
-      id: uid('state'), sequenceNumber, assetId: asset.id, eventType,
+      id: uid('state'), sequenceNumber, assetId: asset.id, assetNumber: asset.projectNumber, eventType,
       previousState, nextState: `${asset.currentState.holder}; ${asset.currentState.currentLocation}; ${asset.currentState.condition}; ${asset.currentState.visibility}`,
       locationId, actorId: asset.currentState.holder === 'None' ? 'UNASSIGNED' : asset.currentState.holder, notes: input, createdAt: nowIso(),
     };
     next.stateEvents.push(event);
-    next.continuity.events.push({ id: uid('continuity'), sequenceNumber, assetId: asset.id, field: 'object state', previousValue: previousState, nextValue: event.nextState, reason: input, createdAt: event.createdAt });
+    next.continuity.events.push({ id: uid('continuity'), sequenceNumber, assetId: asset.id, assetNumber: asset.projectNumber, field: 'object state', previousValue: previousState, nextValue: event.nextState, reason: input, createdAt: event.createdAt });
     next.sequences.filter((item) => item.number >= sequenceNumber).forEach((item) => { item.status = 'Needs Review'; item.version += 1; });
-    return { project: next, response: message(`Recorded ${asset.id} as ${eventType} in Sequence ${sequenceNumber}. Owner, holder, current and previous location, condition, visibility, scene relationships, and every later opening state will inherit the change.`, { kind: 'scene', sequenceNumber }) };
+    return { project: next, response: message(`Recorded ${assetProductionReference(asset)} as ${eventType} in Sequence ${sequenceNumber}. Owner, holder, current and previous location, condition, visibility, scene relationships, and every later opening state will inherit the change.`, { kind: 'scene', sequenceNumber }) };
   }
 
   if (asset && sequenceNumber > 0 && /break|broken|damage|damaged|injur|cut|burn|torn|destroy/.test(lower)) {
@@ -1282,13 +1423,13 @@ export function interpretStudioMessage(project: StudioProject, input: string): {
     asset.currentState.damage = damage;
     asset.currentState.condition = damage === 'Destroyed' ? 'Destroyed' : 'Damaged';
     const event: AssetStateEvent = {
-      id: uid('state'), sequenceNumber, assetId: asset.id, eventType: 'damage', previousState: previousDamage,
+      id: uid('state'), sequenceNumber, assetId: asset.id, assetNumber: asset.projectNumber, eventType: 'damage', previousState: previousDamage,
       nextState: damage, locationId: asset.currentState.currentLocation, actorId: 'STORY_EVENT', notes: input, createdAt: nowIso(),
     };
     next.stateEvents.push(event);
-    next.continuity.events.push({ id: uid('continuity'), sequenceNumber, assetId: asset.id, field: 'damage', previousValue: previousDamage, nextValue: damage, reason: input, createdAt: event.createdAt });
+    next.continuity.events.push({ id: uid('continuity'), sequenceNumber, assetId: asset.id, assetNumber: asset.projectNumber, field: 'damage', previousValue: previousDamage, nextValue: damage, reason: input, createdAt: event.createdAt });
     next.sequences.filter((item) => item.number >= sequenceNumber).forEach((item) => { item.status = 'Needs Review'; item.version += 1; });
-    return { project: next, response: message(`${damage} is now attached to ${asset.id} from Sequence ${sequenceNumber}. It persists across later scenes until a recorded repair or transformation changes it.`, { kind: 'scene', sequenceNumber }) };
+    return { project: next, response: message(`${damage} is now attached to ${assetProductionReference(asset)} from Sequence ${sequenceNumber}. It persists across later scenes until a recorded repair or transformation changes it.`, { kind: 'scene', sequenceNumber }) };
   }
 
   if (asset && sequenceNumber > 0 && /transform|morph|deploy|fold|unfold|age|variant|special form/.test(lower)) {
@@ -1296,18 +1437,19 @@ export function interpretStudioMessage(project: StudioProject, input: string): {
     const nextState = /deploy|unfold/.test(lower) ? 'Deployed state' : /fold/.test(lower) ? 'Folded state' : /age/.test(lower) ? 'Age variant' : 'Transformed state';
     asset.currentState.transformation = nextState;
     const event: AssetStateEvent = {
-      id: uid('state'), sequenceNumber, assetId: asset.id, eventType: 'transformation', previousState: previous, nextState,
+      id: uid('state'), sequenceNumber, assetId: asset.id, assetNumber: asset.projectNumber, eventType: 'transformation', previousState: previous, nextState,
       locationId: asset.currentState.currentLocation, actorId: asset.id, notes: input, createdAt: nowIso(),
     };
     next.stateEvents.push(event);
-    next.continuity.events.push({ id: uid('continuity'), sequenceNumber, assetId: asset.id, field: 'transformation', previousValue: previous, nextValue: nextState, reason: input, createdAt: event.createdAt });
+    next.continuity.events.push({ id: uid('continuity'), sequenceNumber, assetId: asset.id, assetNumber: asset.projectNumber, field: 'transformation', previousValue: previous, nextValue: nextState, reason: input, createdAt: event.createdAt });
     next.sequences.filter((item) => item.number >= sequenceNumber).forEach((item) => { item.status = 'Needs Review'; item.version += 1; });
-    return { project: next, response: message(`${asset.id} remains one permanent identity. Its ${nextState.toLowerCase()} begins in Sequence ${sequenceNumber}, with ordered source, intermediate, final, material, body, costume, mechanical, effect, and continuity stages attached to that same asset.`, { kind: 'scene', sequenceNumber }) };
+    return { project: next, response: message(`${assetProductionReference(asset)} remains one permanent identity. Its ${nextState.toLowerCase()} begins in Sequence ${sequenceNumber}, with ordered source, intermediate, final, material, body, costume, mechanical, effect, and continuity stages attached to that same asset number.`, { kind: 'scene', sequenceNumber }) };
   }
 
   if (sequenceNumber > 0 && /rain|snow|fog|smoke|wind|dust|fire|water|weather/.test(lower) && /(start|begin|increase|stop|clear|change|become|turn)/.test(lower)) {
     const environment = next.environments[0];
     if (environment) {
+      const environmentAsset = next.assets.find((asset) => asset.id === environment.id);
       const previous = `${environment.weather}; ${environment.atmosphere.join(', ')}; ${environment.wind}; ${environment.fireState}`;
       if (/rain/.test(lower)) environment.weather = /stop|clear/.test(lower) ? 'Rain stopped' : 'Rain';
       if (/snow/.test(lower)) environment.weather = /stop|clear/.test(lower) ? 'Snow stopped' : 'Snow';
@@ -1317,7 +1459,7 @@ export function interpretStudioMessage(project: StudioProject, input: string): {
       if (/fire/.test(lower)) environment.fireState = /stop|clear/.test(lower) ? 'Extinguished' : 'Active';
       environment.activeFromSequence = sequenceNumber;
       const current = `${environment.weather}; ${environment.atmosphere.join(', ')}; ${environment.wind}; ${environment.fireState}`;
-      next.stateEvents.push({ id: uid('state'), sequenceNumber, assetId: environment.id, eventType: 'environment evolution', previousState: previous, nextState: current, locationId: environment.locationId, actorId: 'ENVIRONMENT', notes: input, createdAt: nowIso() });
+      next.stateEvents.push({ id: uid('state'), sequenceNumber, assetId: environment.id, assetNumber: environmentAsset?.projectNumber ?? 0, eventType: 'environment evolution', previousState: previous, nextState: current, locationId: environment.locationId, actorId: 'ENVIRONMENT', notes: input, createdAt: nowIso() });
       next.sequences.filter((item) => item.number >= sequenceNumber).forEach((item) => { item.status = 'Needs Review'; item.version += 1; });
       return { project: next, response: message(`Environment evolution is recorded from Sequence ${sequenceNumber}: ${current}. The location identity stays unchanged while weather, atmosphere, surfaces, lighting, sound, and later continuity inherit the new state.`, { kind: 'world', sequenceNumber }) };
     }
@@ -1328,11 +1470,12 @@ export function interpretStudioMessage(project: StudioProject, input: string): {
     const remove = /remove|off|without/.test(lower);
     const event: ContinuityEvent = {
       id: uid('continuity'), sequenceNumber, assetId: protagonistAsset?.id ?? 'CHARACTER_001', field: 'head covering',
+      assetNumber: protagonistAsset?.projectNumber ?? 0,
       previousValue: remove ? 'ON' : 'OFF', nextValue: remove ? 'OFF' : 'ON', reason: input, createdAt: nowIso(),
     };
     next.continuity.events.push(event);
     next.sequences.filter((item) => item.number >= sequenceNumber).forEach((item) => { item.status = 'Needs Review'; item.version += 1; });
-    return { project: next, response: message(`Recorded: ${event.assetId} head covering is ${event.nextValue} from Sequence ${sequenceNumber}. I marked Sequence ${sequenceNumber} and every later sequence for continuity review.`, { kind: 'sequence', sequenceNumber }) };
+    return { project: next, response: message(`Recorded: Asset ${formatAssetNumber(event.assetNumber)} head covering is ${event.nextValue} from Sequence ${sequenceNumber}. I marked Sequence ${sequenceNumber} and every later sequence for continuity review.`, { kind: 'sequence', sequenceNumber }) };
   }
 
   if (/make (?:the )?(?:entire )?movie.*night|night only/.test(lower)) {
@@ -1354,9 +1497,20 @@ export function interpretStudioMessage(project: StudioProject, input: string): {
     return { project: next, response: message(`${next.title}: Story ${next.story.status}. World Bible ${next.worldBible.status}. Film Bible ${next.filmBible.status}. Assets ${approvedAssets}/${next.assets.length} approved. Locations ${next.locations.length}. Environment states ${next.environments.length}. Knowledge relationships ${next.knowledgeGraph.edges.length}. Sequences ${approvedSequences}/${next.sequenceCount} approved. Current Sequence ${next.currentSequence}. Continuity ${next.continuity.status}.`, { kind: 'status' }) };
   }
 
+  if (/download (?:all |movie |project )?assets|export (?:all )?assets|flat asset folder|single flat asset folder/.test(lower)) {
+    return {
+      project: next,
+      response: message(
+        `${next.flatAssetFolder.folderName} is ready under the SINGLE FLAT ASSET FOLDER RULE. It contains only approved generated visual assets, sorted by the permanent filenames ${next.assets.slice(0, 4).map((asset) => asset.generatedFileName).join(', ')}${next.assets.length > 4 ? ', …' : ''}. There are no subfolders and numbering never restarts by category.`,
+        { kind: 'flat-assets', assetIds: next.assets.map((asset) => asset.id) },
+      ),
+      sideEffect: 'asset-export',
+    };
+  }
+
   if (/export (?:the )?(?:whole|full|entire|everything|project)|\/export/.test(lower)) {
     next.exportStatus = 'Ready';
-    return { project: next, response: message(`The complete project package is ready. It includes story, World Bible, Film Bible, locations, interiors, environment evolution, asset identities and states, reference coverage, scene states, scene graphs, sequence manifests, prompts, Ending States, the production knowledge graph, continuity timeline, media references, and export history. API keys are never included.`, { kind: 'export' }), sideEffect: 'export' };
+    return { project: next, response: message(`The complete project package is ready. It includes story, World Bible, Film Bible, locations, interiors, environment evolution, numbered asset identities and states, reference coverage, scene states, scene graphs, numbered sequence manifests, prompts, Ending States, the production knowledge graph, continuity timeline, media references, and export history. Every approved generated visual asset is placed directly inside ${next.flatAssetFolder.folderName} with no subfolders. API keys are never included.`, { kind: 'export' }), sideEffect: 'export' };
   }
 
   if (/^continue\.?$|what(?:'s| is) next/.test(lower)) {

@@ -70,6 +70,10 @@ function durationLabel(seconds: number) {
   return `${minutes}:${String(remainder).padStart(2, '0')}`;
 }
 
+function assetNumber(value: number) {
+  return String(value).padStart(3, '0');
+}
+
 function assetTone(category: string) {
   const tones: Record<string, string> = {
     Characters: 'from-amber-400/22 to-orange-950/10 text-amber-200',
@@ -131,6 +135,7 @@ function ProjectStatus({ project }: { project: StudioProject }) {
             <StatusLine label="World Bible" value={project.worldBible.status} />
             <StatusLine label="Film Bible" value={project.filmBible.status} />
             <StatusLine label="Assets" value={`${approvedAssets}/${project.assets.length}`} />
+            <StatusLine label="Asset folder" value={project.flatAssetFolder.folderName} />
             <StatusLine label="Sequences" value={`${approvedSequences}/${project.sequenceCount}`} />
             <StatusLine label="Current" value={`Sequence ${project.currentSequence}`} />
             <StatusLine label="Export" value={project.exportStatus} />
@@ -217,9 +222,10 @@ function WorldCard({ project, onAction }: { project: StudioProject; onAction: (m
         <StateBlock label="Technology" value={world.technologyLevel} />
         <StateBlock label="Culture" value={world.culture} />
       </div>
-      <div className="grid gap-4 px-4 pb-4 sm:grid-cols-2">
+      <div className="grid gap-4 px-4 pb-4 sm:grid-cols-3">
         <RuleGroup title="Materials & architecture" rules={[...world.architecture, ...world.constructionMaterials]} />
         <RuleGroup title="Physical-world restrictions" rules={[...world.physicalRules, ...world.restrictions]} />
+        <RuleGroup title="Single flat asset folder" rules={world.objectRules.slice(0, 3)} />
       </div>
       <div className="flex flex-wrap gap-2 border-t border-border/70 bg-background/35 px-4 py-3">
         {world.status !== 'Approved' && <Button size="sm" onClick={() => onAction('Approve the World Bible')}><Check />Approve World Bible</Button>}
@@ -244,12 +250,13 @@ function AssetMiniCard({ asset, onAction }: { asset: StudioAsset; onAction: (mes
   const coverage = Math.round(Object.values(asset.referenceCoverage).reduce((total, value) => total + value, 0) / Object.keys(asset.referenceCoverage).length);
   return (
     <article className="group overflow-hidden rounded-xl border border-border bg-background/55">
-      <div className={cn('flex h-20 items-end bg-gradient-to-br p-3', assetTone(asset.category))}>
+      <div className={cn('flex h-20 items-end justify-between bg-gradient-to-br p-3', assetTone(asset.category))}>
         <div className="flex size-8 items-center justify-center rounded-lg border border-current/15 bg-black/15"><ImageIcon className="size-4" /></div>
+        <span className="font-mono text-xl font-semibold tracking-[-0.04em]">{assetNumber(asset.projectNumber)}</span>
       </div>
       <div className="p-3">
         <div className="flex items-start justify-between gap-2">
-          <div className="min-w-0"><p className="truncate text-xs font-medium">{asset.name}</p><p className="mt-0.5 font-mono text-[9px] text-muted-foreground">{asset.id} · V{String(asset.version).padStart(2, '0')}</p></div>
+          <div className="min-w-0"><p className="truncate text-xs font-medium">Asset {assetNumber(asset.projectNumber)} · {asset.name}</p><p className="mt-0.5 truncate font-mono text-[9px] text-muted-foreground">{asset.generatedFileName}</p><p className="mt-0.5 font-mono text-[9px] text-muted-foreground/70">V{String(asset.version).padStart(2, '0')} · {asset.id}</p></div>
           {asset.lockState === 'Locked' && <Lock className="size-3.5 shrink-0 text-emerald-300" />}
         </div>
         <div className="mt-2 flex flex-wrap gap-1.5"><Badge variant="outline" className={cn('h-4 px-1.5 text-[9px]', statusClass(asset.approvalState))}>{asset.approvalState}</Badge><Badge variant="outline" className="h-4 px-1.5 text-[9px]">{asset.importance}</Badge></div>
@@ -265,11 +272,11 @@ function AssetMiniCard({ asset, onAction }: { asset: StudioAsset; onAction: (mes
 }
 
 function AssetsCard({ project, ids, onAction, onOpenLibrary }: { project: StudioProject; ids?: string[]; onAction: (message: string) => void; onOpenLibrary: () => void }) {
-  const selected = ids?.length ? project.assets.filter((asset) => ids.includes(asset.id)) : project.assets;
+  const selected = (ids?.length ? project.assets.filter((asset) => ids.includes(asset.id)) : project.assets).slice().sort((a, b) => a.projectNumber - b.projectNumber);
   return (
     <section className="mt-4 rounded-2xl border border-border bg-card/65 p-4">
       <div className="flex items-center justify-between gap-3">
-        <div><p className="text-sm font-medium">Asset manifest</p><p className="mt-1 text-xs text-muted-foreground">{project.assets.length} stable production assets</p></div>
+        <div><p className="text-sm font-medium">One flat numbered asset manifest</p><p className="mt-1 text-xs text-muted-foreground">{project.assets.length} permanent numbers · {project.flatAssetFolder.folderName} · no subfolders</p></div>
         <Button size="sm" variant="outline" onClick={onOpenLibrary}>View library</Button>
       </div>
       <div className="mt-4 grid grid-cols-2 gap-2.5 sm:grid-cols-3">
@@ -302,7 +309,7 @@ function SequenceCard({ sequence, onAction }: { sequence: StudioSequence; onActi
           <StateBlock label="Opening state" value={sequence.openingState} />
           <StateBlock label="Closing state" value={sequence.closingState} />
         </div>
-        <div><p className="text-[10px] font-semibold uppercase tracking-[0.14em] text-muted-foreground">Exact reference assets</p><div className="mt-2 flex flex-wrap gap-1.5">{sequence.assetIds.map((id) => <Badge key={id} variant="outline" className="font-mono text-[9px]">{id}</Badge>)}</div></div>
+        <div><p className="text-[10px] font-semibold uppercase tracking-[0.14em] text-muted-foreground">Exact numbered reference files</p><div className="mt-2 flex flex-wrap gap-1.5">{sequence.assetFiles.map((fileName, index) => <Badge key={fileName} variant="outline" className="font-mono text-[9px]">Asset {assetNumber(sequence.assetNumbers[index])} · {fileName}</Badge>)}</div></div>
         <div className="grid gap-3 text-xs sm:grid-cols-3">
           <StateBlock label="Scene state" value={`${sequence.sceneState.locationId} · ${sequence.sceneState.environmentId}`} />
           <StateBlock label="Scene graph" value={`${sequence.sceneGraph.nodes.length} nodes · ${sequence.sceneGraph.edges.length} relationships`} />
@@ -349,7 +356,7 @@ function ReferenceCoverageCard({ assets }: { assets: StudioAsset[] }) {
         const entries = Object.entries(asset.referenceCoverage);
         const coverage = Math.round(entries.reduce((total, [, value]) => total + value, 0) / entries.length);
         const missing = entries.filter(([, value]) => value < 50).map(([key]) => key);
-        return <div key={asset.id} className="rounded-xl bg-background/55 p-3"><div className="flex items-center justify-between gap-3 text-xs"><span className="font-medium">{asset.id} · {asset.name}</span><span className="tabular-nums text-muted-foreground">{coverage}%</span></div><Progress value={coverage} className="mt-2" /><p className="mt-2 text-[10px] text-muted-foreground">{missing.length ? `Needs: ${missing.join(', ')}` : 'Coverage is production-ready.'}</p></div>;
+        return <div key={asset.id} className="rounded-xl bg-background/55 p-3"><div className="flex items-center justify-between gap-3 text-xs"><span className="font-medium">Asset {assetNumber(asset.projectNumber)} · {asset.name}</span><span className="tabular-nums text-muted-foreground">{coverage}%</span></div><p className="mt-1 truncate font-mono text-[9px] text-muted-foreground">{asset.generatedFileName}</p><Progress value={coverage} className="mt-2" /><p className="mt-2 text-[10px] text-muted-foreground">{missing.length ? `Needs: ${missing.join(', ')}` : 'Coverage is production-ready.'}</p></div>;
       })}</div>
     </section>
   );
@@ -368,7 +375,19 @@ function ExportCard({ project, onExport }: { project: StudioProject; onExport: (
   );
 }
 
-function MessageItem({ item, project, onAction, onOpenLibrary, onExport }: { item: StudioMessage; project: StudioProject; onAction: (message: string) => void; onOpenLibrary: () => void; onExport: () => void }) {
+function FlatAssetExportCard({ project, onAssetExport }: { project: StudioProject; onAssetExport: () => void }) {
+  return (
+    <section className="mt-4 rounded-2xl border border-amber-300/20 bg-card/65 p-4">
+      <div className="flex items-start justify-between gap-4">
+        <div className="flex min-w-0 items-start gap-3"><span className="grid size-10 shrink-0 place-items-center rounded-xl bg-amber-300/10 text-amber-200"><Download className="size-5" /></span><div className="min-w-0"><p className="text-sm font-medium">{project.flatAssetFolder.folderName}</p><p className="mt-1 text-xs leading-5 text-muted-foreground">One flat folder. No category folders. Files sort by permanent project number.</p></div></div>
+        <Button size="sm" onClick={onAssetExport}><Download />All assets</Button>
+      </div>
+      <div className="mt-4 flex flex-wrap gap-1.5">{project.assets.slice(0, 6).map((asset) => <Badge key={asset.id} variant="outline" className="font-mono text-[9px]">{asset.generatedFileName}</Badge>)}</div>
+    </section>
+  );
+}
+
+function MessageItem({ item, project, onAction, onOpenLibrary, onExport, onAssetExport }: { item: StudioMessage; project: StudioProject; onAction: (message: string) => void; onOpenLibrary: () => void; onExport: () => void; onAssetExport: () => void }) {
   if (item.role === 'user') {
     return <div className="ml-auto max-w-[82%] rounded-[18px_18px_5px_18px] bg-secondary px-4 py-3 text-sm leading-6 text-secondary-foreground shadow-sm">{item.content}</div>;
   }
@@ -386,6 +405,7 @@ function MessageItem({ item, project, onAction, onOpenLibrary, onExport }: { ite
           {['scene', 'graph', 'lookahead'].includes(item.metadata?.kind ?? '') && sequence && <SceneIntelligenceCard sequence={sequence} />}
           {item.metadata?.kind === 'coverage' && <ReferenceCoverageCard assets={item.metadata.assetIds?.length ? project.assets.filter((asset) => item.metadata?.assetIds?.includes(asset.id)) : project.assets.filter((asset) => asset.importance !== 'Incidental')} />}
           {item.metadata?.kind === 'export' && <ExportCard project={project} onExport={onExport} />}
+          {item.metadata?.kind === 'flat-assets' && <FlatAssetExportCard project={project} onAssetExport={onAssetExport} />}
           {item.metadata?.kind === 'attachment' && <div className="mt-3 flex items-center gap-3 rounded-xl border border-border bg-card/55 p-3"><FileImage className="size-4 text-amber-200" /><span className="text-xs text-muted-foreground">Original reference stored in project memory</span></div>}
         </div>
       </div>
@@ -431,6 +451,28 @@ export function StudioApp() {
     anchor.click();
     anchor.remove();
   }, [project?.id]);
+
+  const downloadAssets = useCallback(async (projectId = project?.id) => {
+    if (!projectId) return;
+    setError('');
+    try {
+      const response = await fetch(`/api/assets?projectId=${encodeURIComponent(projectId)}`);
+      if (!response.ok) {
+        const data = await response.json() as { error?: string };
+        throw new Error(data.error || 'The flat asset folder is not ready yet.');
+      }
+      const blobUrl = URL.createObjectURL(await response.blob());
+      const anchor = document.createElement('a');
+      anchor.href = blobUrl;
+      anchor.download = `${project?.flatAssetFolder.folderName ?? 'MOVIE_ASSETS'}.zip`;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      URL.revokeObjectURL(blobUrl);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'The flat asset folder could not be downloaded.');
+    }
+  }, [project]);
 
   const loadProject = useCallback(async (projectId: string) => {
     setBooting(true);
@@ -533,12 +575,13 @@ export function StudioApp() {
       setDraft('');
       setFiles([]);
       if (data.sideEffect === 'export') window.setTimeout(() => downloadExport(data.project!.id), 300);
+      if (data.sideEffect === 'asset-export') window.setTimeout(() => void downloadAssets(data.project!.id), 300);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'The instruction could not be applied.');
     } finally {
       setWorking(false);
     }
-  }, [downloadExport, project, projects, uploadFiles, working]);
+  }, [downloadAssets, downloadExport, project, projects, uploadFiles, working]);
 
   const onSubmit = (event: { preventDefault: () => void }) => {
     event.preventDefault();
@@ -569,11 +612,12 @@ export function StudioApp() {
   const filteredProjects = useMemo(() => projects.filter((item) => item.title.toLowerCase().includes(search.toLowerCase())), [projects, search]);
   const filteredAssets = useMemo(() => {
     if (!project) return [];
-    if (assetFilter === 'All') return project.assets;
-    if (assetFilter === 'Approved') return project.assets.filter((asset) => ['Approved', 'Locked'].includes(asset.approvalState));
-    if (assetFilter === 'Pending') return project.assets.filter((asset) => asset.approvalState === 'Pending');
-    if (assetFilter === 'Needs Review') return project.assets.filter((asset) => asset.approvalState === 'Needs Review');
-    return project.assets.filter((asset) => asset.category === assetFilter);
+    const selected = assetFilter === 'All' ? project.assets
+      : assetFilter === 'Approved' ? project.assets.filter((asset) => ['Approved', 'Locked'].includes(asset.approvalState))
+        : assetFilter === 'Pending' ? project.assets.filter((asset) => asset.approvalState === 'Pending')
+          : assetFilter === 'Needs Review' ? project.assets.filter((asset) => asset.approvalState === 'Needs Review')
+            : project.assets.filter((asset) => asset.category === assetFilter);
+    return selected.slice().sort((a, b) => a.projectNumber - b.projectNumber);
   }, [assetFilter, project]);
 
   return (
@@ -618,13 +662,13 @@ export function StudioApp() {
         </header>
 
         {booting ? <LoadingSurface /> : view === 'chat' ? (
-          <ChatView project={project} messages={messages} working={working} error={error} onAction={onAction} onOpenLibrary={() => setView('assets')} onExport={() => downloadExport()} endRef={messagesEndRef} />
+          <ChatView project={project} messages={messages} working={working} error={error} onAction={onAction} onOpenLibrary={() => setView('assets')} onExport={() => downloadExport()} onAssetExport={() => void downloadAssets()} endRef={messagesEndRef} />
         ) : view === 'projects' ? (
           <ProjectsView projects={filteredProjects} search={search} setSearch={setSearch} searchRef={searchRef} onOpen={loadProject} onNew={startNewMovie} />
         ) : view === 'assets' ? (
-          <AssetsView project={project} assets={filteredAssets} filter={assetFilter} setFilter={setAssetFilter} onAction={onAction} onNew={startNewMovie} />
+          <AssetsView project={project} assets={filteredAssets} filter={assetFilter} setFilter={setAssetFilter} onAction={onAction} onAssetExport={() => void downloadAssets()} onNew={startNewMovie} />
         ) : view === 'exports' ? (
-          <ExportsView project={project} onExport={() => downloadExport()} onNew={startNewMovie} />
+          <ExportsView project={project} onExport={() => downloadExport()} onAssetExport={() => void downloadAssets()} onNew={startNewMovie} />
         ) : (
           <SettingsView project={project} lightMode={lightMode} setLightMode={(value) => { setLightMode(value); document.documentElement.classList.toggle('dark', !value); }} onUpdate={(settings) => void updateProject({ action: 'settings', settings })} />
         )}
@@ -640,7 +684,7 @@ export function StudioApp() {
                   <input ref={fileInputRef} type="file" multiple className="sr-only" accept="image/*,video/*,audio/*,.pdf,.doc,.docx,.txt" onChange={(event) => setFiles((current) => [...current, ...Array.from(event.target.files ?? [])])} />
                   <Button type="button" variant="ghost" size="icon" className="rounded-full" onClick={() => fileInputRef.current?.click()} aria-label="Attach reference"><Paperclip className="size-[18px]" strokeWidth={1.7} /></Button>
                   <Button type="button" variant="ghost" size="icon" className="rounded-full" disabled title="Microphone input is optional and not enabled in this browser" aria-label="Microphone unavailable"><Mic className="size-[18px]" strokeWidth={1.7} /></Button>
-                  {project && <span className="ml-1 hidden text-[10px] text-muted-foreground sm:inline">Try /world, /assets, /scene 1, /status</span>}
+                  {project && <span className="ml-1 hidden text-[10px] text-muted-foreground sm:inline">Try /assets, “show Asset 007”, “download all assets”</span>}
                 </div>
                 <Button type="submit" size="icon" disabled={working || (!draft.trim() && files.length === 0)} className="size-9 rounded-full" aria-label="Send instruction">{working ? <LoaderCircle className="animate-spin" /> : <ArrowUp className="size-[18px]" strokeWidth={2} />}</Button>
               </div>
@@ -657,7 +701,7 @@ function LoadingSurface() {
   return <div className="grid flex-1 place-items-center"><div className="flex items-center gap-2 text-sm text-muted-foreground"><LoaderCircle className="size-4 animate-spin" />Opening project memory…</div></div>;
 }
 
-function ChatView({ project, messages, working, error, onAction, onOpenLibrary, onExport, endRef }: { project: StudioProject | null; messages: StudioMessage[]; working: boolean; error: string; onAction: (message: string) => void; onOpenLibrary: () => void; onExport: () => void; endRef: React.RefObject<HTMLDivElement | null> }) {
+function ChatView({ project, messages, working, error, onAction, onOpenLibrary, onExport, onAssetExport, endRef }: { project: StudioProject | null; messages: StudioMessage[]; working: boolean; error: string; onAction: (message: string) => void; onOpenLibrary: () => void; onExport: () => void; onAssetExport: () => void; endRef: React.RefObject<HTMLDivElement | null> }) {
   if (!project && messages.length === 0) return (
     <div className="min-h-0 flex-1 overflow-y-auto">
       <div className="mx-auto flex min-h-full w-full max-w-[780px] flex-col items-center justify-center px-5 pb-40 pt-16 text-center sm:px-8">
@@ -672,7 +716,7 @@ function ChatView({ project, messages, working, error, onAction, onOpenLibrary, 
   return (
     <div className="min-h-0 flex-1 overflow-y-auto scroll-smooth">
       <div className="mx-auto w-full max-w-[780px] space-y-7 px-4 pb-48 pt-8 sm:px-6 sm:pt-12">
-        {messages.map((item) => <MessageItem key={item.id} item={item} project={project!} onAction={onAction} onOpenLibrary={onOpenLibrary} onExport={onExport} />)}
+        {messages.map((item) => <MessageItem key={item.id} item={item} project={project!} onAction={onAction} onOpenLibrary={onOpenLibrary} onExport={onExport} onAssetExport={onAssetExport} />)}
         {working && <div className="flex items-center gap-3"><span className="brand-mark grid size-7 place-items-center rounded-lg"><Clapperboard className="size-3.5" /></span><div className="flex gap-1.5"><span className="size-1.5 animate-pulse rounded-full bg-muted-foreground" /><span className="size-1.5 animate-pulse rounded-full bg-muted-foreground [animation-delay:120ms]" /><span className="size-1.5 animate-pulse rounded-full bg-muted-foreground [animation-delay:240ms]" /></div></div>}
         {error && <p className="rounded-xl border border-rose-400/20 bg-rose-400/10 px-4 py-2 text-xs text-rose-200">{error}</p>}
         <div ref={endRef} />
@@ -692,15 +736,18 @@ function ProjectsView({ projects, search, setSearch, searchRef, onOpen, onNew }:
   </PageFrame>;
 }
 
-function AssetsView({ project, assets, filter, setFilter, onAction, onNew }: { project: StudioProject | null; assets: StudioAsset[]; filter: string; setFilter: (value: string) => void; onAction: (message: string) => void; onNew: () => void }) {
-  return <PageFrame eyebrow="Visual source of truth" title="Asset Library" description="Permanent IDs, references, approvals, locks, and version history for the active movie." action={project ? <Badge variant="outline">{project.assets.length} assets</Badge> : undefined}>
+function AssetsView({ project, assets, filter, setFilter, onAction, onAssetExport, onNew }: { project: StudioProject | null; assets: StudioAsset[]; filter: string; setFilter: (value: string) => void; onAction: (message: string) => void; onAssetExport: () => void; onNew: () => void }) {
+  return <PageFrame eyebrow="One movie · one flat folder" title="Asset Library" description="Every category shares one permanent numeric sequence. Cards, filenames, prompts, references, continuity, and downloads use the same number." action={project ? <Button size="sm" onClick={onAssetExport}><Download />Download all assets</Button> : undefined}>
     {!project ? <EmptyCollection icon={Library} title="No active movie" text="Create or open a movie to see its isolated asset library." action={<Button onClick={onNew}><Plus />Create a movie</Button>} /> : <><div className="flex gap-2 overflow-x-auto pb-2">{assetFilters.map((item) => <Button key={item} size="sm" variant={filter === item ? 'default' : 'outline'} onClick={() => setFilter(item)} className="shrink-0">{item}</Button>)}</div>{assets.length === 0 ? <EmptyCollection icon={ImageIcon} title={`No ${filter.toLowerCase()} assets`} text="This filter has no matching assets in the active project." /> : <div className="mt-5 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5">{assets.map((asset) => <AssetMiniCard key={asset.id} asset={asset} onAction={onAction} />)}</div>}</>}
   </PageFrame>;
 }
 
-function ExportsView({ project, onExport, onNew }: { project: StudioProject | null; onExport: () => void; onNew: () => void }) {
-  return <PageFrame eyebrow="Preserve the production" title="Exports" description="Download a portable package with human-readable creative documents and complete structured project memory.">
-    {!project ? <EmptyCollection icon={Archive} title="No active movie" text="Open a movie before preparing its production package." action={<Button onClick={onNew}><Plus />Create a movie</Button>} /> : <div className="grid gap-4 lg:grid-cols-[1.5fr_1fr]"><div className="rounded-2xl border border-border bg-card/55 p-5"><div className="flex items-start gap-4"><span className="grid size-12 shrink-0 place-items-center rounded-xl bg-amber-300/10 text-amber-200"><FileArchive className="size-6" /></span><div><h2 className="font-medium">{project.title} · Full Project</h2><p className="mt-2 max-w-xl text-sm leading-6 text-muted-foreground">A compressed production folder with the story, script, Film Bible, asset manifest, exact sequence prompts, continuity records, references, generation history, and project metadata.</p></div></div><div className="mt-5 flex flex-wrap gap-2"><Badge variant="outline">No API keys</Badge><Badge variant="outline">Stable filenames</Badge><Badge variant="outline">Original references</Badge><Badge variant="outline">Version history</Badge></div><Button className="mt-6" onClick={onExport}><Download />Download full project</Button></div><div className="rounded-2xl border border-border bg-background/45 p-5"><p className="text-xs font-medium">Package status</p><div className="mt-4 space-y-3"><StatusLine label="Story" value={project.story.status} /><StatusLine label="Film Bible" value={project.filmBible.status} /><StatusLine label="References" value={`${project.attachments.length} stored`} /><StatusLine label="Last export" value={project.exportStatus} /></div></div></div>}
+function ExportsView({ project, onExport, onAssetExport, onNew }: { project: StudioProject | null; onExport: () => void; onAssetExport: () => void; onNew: () => void }) {
+  return <PageFrame eyebrow="Preserve the production" title="Exports" description="Download the complete project or one clean, flat, permanently numbered asset folder for your video generator.">
+    {!project ? <EmptyCollection icon={Archive} title="No active movie" text="Open a movie before preparing its production package." action={<Button onClick={onNew}><Plus />Create a movie</Button>} /> : <div className="grid gap-4 lg:grid-cols-2">
+      <div className="rounded-2xl border border-amber-300/20 bg-card/55 p-5"><div className="flex items-start gap-4"><span className="grid size-12 shrink-0 place-items-center rounded-xl bg-amber-300/10 text-amber-200"><Download className="size-6" /></span><div><h2 className="font-medium">{project.flatAssetFolder.folderName}</h2><p className="mt-2 text-sm leading-6 text-muted-foreground">All approved generated visual assets together in one folder. No character, location, prop, category, or sequence subfolders.</p></div></div><div className="mt-5 flex flex-wrap gap-2"><Badge variant="outline">001 → final asset</Badge><Badge variant="outline">No subfolders</Badge><Badge variant="outline">Seedance-ready order</Badge></div><Button className="mt-6" onClick={onAssetExport}><Download />Download all assets</Button></div>
+      <div className="rounded-2xl border border-border bg-card/55 p-5"><div className="flex items-start gap-4"><span className="grid size-12 shrink-0 place-items-center rounded-xl bg-secondary text-muted-foreground"><FileArchive className="size-6" /></span><div><h2 className="font-medium">{project.title} · Full Project</h2><p className="mt-2 text-sm leading-6 text-muted-foreground">Story, World Bible, prompts, continuity, references, reports, and the same flat numbered generated-asset folder.</p></div></div><div className="mt-5 flex flex-wrap gap-2"><Badge variant="outline">No API keys</Badge><Badge variant="outline">Original references</Badge><Badge variant="outline">Version history</Badge></div><Button className="mt-6" variant="outline" onClick={onExport}><FileArchive />Download full project</Button></div>
+    </div>}
   </PageFrame>;
 }
 

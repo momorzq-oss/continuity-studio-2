@@ -282,7 +282,7 @@ function initialAssistantMessage(project: StudioProject): StudioMessage {
     id: `message_${crypto.randomUUID()}`,
     role: 'assistant',
     createdAt: nowIso(),
-    content: `I created “${project.title}” as one connected ${project.durationSeconds / 60}-minute production world with ${project.sequenceCount} sequences, ${project.assets.length} tracked assets, ${project.locations.length} structured locations, ${project.environments.length} environment state${project.environments.length === 1 ? '' : 's'}, and ${project.knowledgeGraph.edges.length} production relationships. Review the story first; nothing has been generated or approved yet.`,
+    content: `I created “${project.title}” as one connected ${project.durationSeconds / 60}-minute production world with ${project.sequenceCount} sequences, ${project.assets.length} permanently numbered assets, ${project.locations.length} structured locations, ${project.environments.length} environment state${project.environments.length === 1 ? '' : 's'}, and ${project.knowledgeGraph.edges.length} production relationships. Every visual asset uses one project-wide number and will export directly inside ${project.flatAssetFolder.folderName} with no subfolders. Review the story first; nothing has been generated or approved yet.`,
     metadata: { kind: 'story' },
   };
 }

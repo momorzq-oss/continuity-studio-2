@@ -1,5 +1,5 @@
 import { ensureSchema, getRuntimeEnv } from '@/db/runtime';
-import { normalizeProject, nowIso, type StudioMessage, type StudioProject } from '@/lib/studio';
+import { assetProductionReference, normalizeProject, nowIso, type StudioMessage, type StudioProject } from '@/lib/studio';
 
 export const runtime = 'edge';
 
@@ -89,6 +89,7 @@ export async function POST(request: Request) {
         if (referenceRoles.includes('Costume')) character.referenceCoverage.costume = Math.min(100, character.referenceCoverage.costume + 35);
         character.referenceCoverage.continuity = Math.min(100, character.referenceCoverage.continuity + 20);
         attachment.linkedAssetId = character.id;
+        attachment.linkedAssetNumber = character.projectNumber;
         assetId = `${project.id}:${character.id}`;
         coverageAsset = character;
       }
@@ -97,7 +98,7 @@ export async function POST(request: Request) {
     const assistant: StudioMessage = {
       id: `message_${crypto.randomUUID()}`,
       role: 'assistant',
-      content: `Stored “${file.name}” as ${referenceRoles.join(', ')} reference${referenceRoles.length === 1 ? '' : 's'}. The original file is preserved${assetId ? ' and contributes to the single CHARACTER_001 identity profile' : ''}.`,
+      content: `Stored “${file.name}” as ${referenceRoles.join(', ')} reference${referenceRoles.length === 1 ? '' : 's'}. The original file is preserved${coverageAsset ? ` and contributes to the single ${assetProductionReference(coverageAsset)} identity profile` : ''}.`,
       createdAt,
       metadata: { kind: 'attachment', assetIds: assetId ? ['CHARACTER_001'] : undefined },
     };
