@@ -1,8 +1,11 @@
 import {
   addDialogueLine,
   approveSequenceAndCheckpoint,
+  cancelRenderJob,
+  confirmRenderJob,
   initializeProductionSystem,
   markDependencyChange,
+  pauseRenderJob,
   queueSequenceGeneration,
   registerGeneratedSequenceResult,
   refreshProductionSystem,
@@ -14,6 +17,7 @@ import {
   validateSequence,
 } from './production-system';
 import type { ProductionSystem } from './production-system';
+import { buildRelevantProjectContext, findDuplicateAsset } from './production-control';
 
 export type Approval = 'Draft' | 'Approved';
 export type AssetApproval = 'Pending' | 'Approved' | 'Locked' | 'Needs Review';
@@ -271,9 +275,10 @@ export interface StudioMessage {
   content: string;
   createdAt: string;
   metadata?: {
-    kind?: 'story' | 'bible' | 'world' | 'assets' | 'sequence' | 'scene' | 'graph' | 'coverage' | 'lookahead' | 'status' | 'readiness' | 'timing' | 'dialogue' | 'reference-package' | 'queue' | 'validation' | 'assembly' | 'export' | 'flat-assets' | 'attachment' | 'note';
+    kind?: 'story' | 'bible' | 'world' | 'assets' | 'sequence' | 'scene' | 'graph' | 'coverage' | 'lookahead' | 'status' | 'readiness' | 'timing' | 'dialogue' | 'reference-package' | 'queue' | 'validation' | 'assembly' | 'export' | 'flat-assets' | 'attachment' | 'import' | 'control' | 'integrity' | 'note';
     sequenceNumber?: number;
     assetIds?: string[];
+    attachmentId?: string;
   };
 }
 
@@ -291,6 +296,7 @@ export interface ContinuityEvent {
 
 export interface StudioProject {
   id: string;
+  storageRevision: number;
   title: string;
   createdAt: string;
   updatedAt: string;
@@ -365,6 +371,9 @@ export interface StudioProject {
     byteSize: number;
     createdAt: string;
     referenceRoles: string[];
+    fingerprintSha256?: string;
+    previewKind?: 'image-adaptive' | 'video-native' | 'document' | 'none';
+    integrityStatus?: 'Original' | 'Duplicate' | 'Missing' | 'Verified';
     linkedAssetId?: string;
     linkedAssetNumber?: number;
   }>;
@@ -1026,7 +1035,7 @@ export function createProjectFromIdea(idea: string): StudioProject {
   const visualStyle = genre === 'Horror' ? 'Grounded atmospheric realism with controlled shadows and tactile texture' : 'Grounded cinematic realism with coherent production design';
   const lightingDirection = /night|dark/i.test(idea) ? 'Motivated night sources with protected facial identity' : 'Motivated naturalistic light with consistent direction';
   const projectBase: Omit<StudioProject, 'sequences' | 'production'> = {
-    id: uid('project'), title, createdAt, updatedAt: createdAt, pinned: false, archived: false, idea,
+    id: uid('project'), storageRevision: 0, title, createdAt, updatedAt: createdAt, pinned: false, archived: false, idea,
     durationSeconds, sequenceDurationSeconds, sequenceCount, genre, subgenre, setting, region, period,
     dialogueLanguage: 'Story-defined', aspectRatio: '16:9', resolution: '4K',
     visualStyle,
@@ -1062,6 +1071,7 @@ export function createProjectFromIdea(idea: string): StudioProject {
 
 export function normalizeProject(project: StudioProject): StudioProject {
   const next = structuredClone(project) as StudioProject;
+  next.storageRevision = Number.isInteger(next.storageRevision) ? next.storageRevision : 0;
   const fallbackVisualStyle = next.visualStyle ?? 'Grounded cinematic realism with coherent production design';
   const fallbackLighting = next.lightingDirection ?? 'Motivated naturalistic light with consistent direction';
   next.worldBible ??= makeWorldBible({
@@ -1127,7 +1137,8 @@ export function normalizeProject(project: StudioProject): StudioProject {
     };
   });
   next.assets.sort((a, b) => a.projectNumber - b.projectNumber);
-  const highestAssetNumber = Math.max(0, ...next.assets.map((asset) => asset.projectNumber));
+  const previouslyReservedNumbers = next.production?.control?.reservedNumbers?.filter((item) => item.kind === 'asset').map((item) => item.number) ?? [];
+  const highestAssetNumber = Math.max(0, ...next.assets.map((asset) => asset.projectNumber), ...previouslyReservedNumbers);
   next.flatAssetFolder = {
     rule: 'SINGLE FLAT ASSET FOLDER RULE',
     folderName: flatAssetFolderName(next.title),
@@ -1222,6 +1233,7 @@ export function interpretStudioMessage(project: StudioProject, input: string): {
   const next = normalizeProject(project);
   const lower = input.trim().toLowerCase();
   next.updatedAt = nowIso();
+  buildRelevantProjectContext(next, input);
 
   const requestedDuration = inferDurationSeconds(input, 0);
   if (requestedDuration > 0 && /(make it|change|duration|movie|minute)/.test(lower)) {
@@ -1292,6 +1304,10 @@ export function interpretStudioMessage(project: StudioProject, input: string): {
     const id = `${descriptor.prefix}_${String(stableIndex).padStart(3, '0')}`;
     const requestedName = input.match(/\b(?:called|named)\s+["“]?([^"”.,]+?)(?:\s+(?:for|in)\s+sequence\s+\d+|$)/i)?.[1]?.trim();
     const name = requestedName || `${key[0].toUpperCase()}${key.slice(1)} ${stableIndex}`;
+    const duplicate = findDuplicateAsset(next, name, input);
+    if (duplicate && !/\b(?:separate|distinct|different|intentional duplicate)\b/i.test(input)) {
+      return { project: next, response: message(`Possible duplicate detected before assigning a new permanent number: Asset ${formatAssetNumber(duplicate.asset.projectNumber)} — ${duplicate.asset.name} (${Math.round(duplicate.score * 100)}% semantic match). Reuse that asset, or explicitly say this is a separate distinct production element. No number was reserved.`, { kind: 'control', assetIds: [duplicate.asset.id] }) };
+    }
     const mentionedSequence = Number(lower.match(/sequence\s*(\d+)/)?.[1] ?? 0);
     const sequences = mentionedSequence > 0 && mentionedSequence <= next.sequenceCount
       ? [mentionedSequence]
@@ -1337,6 +1353,35 @@ export function interpretStudioMessage(project: StudioProject, input: string): {
   }
 
   const asset = findAsset(next, input);
+  if (asset && /(?:replace|change|update).*(?:reference|image).*(?:latest|last) attachment/.test(lower)) {
+    const attachment = next.attachments.at(-1);
+    if (!attachment || !attachment.contentType.startsWith('image/')) return { project: next, response: message(`Attach the replacement visual reference first. Asset ${formatAssetNumber(asset.projectNumber)} remains unchanged.`, { kind: 'control', assetIds: [asset.id] }) };
+    const affectedSequenceNumbers = next.sequences.filter((item) => item.assetIds.includes(asset.id)).map((item) => item.number);
+    const affectedAssetIds = next.production.dependencies.filter((item) => item.sourceId === asset.id && item.targetType === 'Asset').map((item) => item.targetId);
+    next.production.control.pendingReferenceReplacement = {
+      id: uid('replacement_impact'), assetId: asset.id, assetNumber: asset.projectNumber, requestedAttachmentId: attachment.id,
+      affectedSequenceNumbers, affectedAssetIds,
+      affectedPromptIds: affectedSequenceNumbers.map((number) => `SEQUENCE_${formatAssetNumber(number)}:PROMPT`),
+      affectedCheckpointIds: next.production.checkpoints.filter((item) => affectedSequenceNumbers.includes(item.sequenceNumber)).map((item) => item.id),
+      createdAt: nowIso(),
+    };
+    return { project: next, response: message(`Replacement impact preview for Asset ${formatAssetNumber(asset.projectNumber)}: ${affectedSequenceNumbers.length} sequence(s), ${affectedAssetIds.length} derived asset link(s), ${affectedSequenceNumbers.length} provider prompt(s), and ${next.production.control.pendingReferenceReplacement.affectedCheckpointIds.length} continuity checkpoint(s) may need review. The permanent number and every unaffected version stay fixed. Say “Confirm replacement Asset ${formatAssetNumber(asset.projectNumber)}” to apply it.`, { kind: 'control', assetIds: [asset.id] }) };
+  }
+  if (asset && /confirm replacement/.test(lower)) {
+    const pending = next.production.control.pendingReferenceReplacement;
+    if (!pending || pending.assetId !== asset.id) return { project: next, response: message(`No reviewed replacement is pending for Asset ${formatAssetNumber(asset.projectNumber)}.`, { kind: 'control', assetIds: [asset.id] }) };
+    const attachment = next.attachments.find((item) => item.id === pending.requestedAttachmentId);
+    if (!attachment) return { project: next, response: message('The reviewed replacement attachment is missing, so nothing changed.', { kind: 'control', assetIds: [asset.id] }) };
+    asset.version += 1;
+    asset.approvalState = 'Needs Review';
+    asset.lockState = 'Unlocked';
+    attachment.linkedAssetId = asset.id;
+    attachment.linkedAssetNumber = asset.projectNumber;
+    asset.referenceCount += 1;
+    next.production.control.pendingReferenceReplacement = null;
+    markDependencyChange(next, asset.id, `Asset ${formatAssetNumber(asset.projectNumber)} reference replaced by ${attachment.name}; permanent number retained, version advanced to ${asset.version}.`);
+    return { project: next, response: message(`Asset ${formatAssetNumber(asset.projectNumber)} is now version ${asset.version} using “${attachment.name}”. No asset or sequence was renumbered; affected dependencies are marked for review and the prior version remains in history.`, { kind: 'control', assetIds: [asset.id] }) };
+  }
   if (asset && /approve|lock/.test(lower)) {
     asset.approvalState = 'Locked';
     asset.lockState = 'Locked';
@@ -1381,7 +1426,7 @@ export function interpretStudioMessage(project: StudioProject, input: string): {
     const counts = Object.entries(next.assets.reduce<Record<string, number>>((acc, item) => { acc[item.category] = (acc[item.category] ?? 0) + 1; return acc; }, {}));
     return { project: next, response: message(`${next.assets.length} permanently numbered assets in ${next.flatAssetFolder.folderName}, from Asset ${formatAssetNumber(next.assets[0]?.projectNumber ?? 0)} through Asset ${formatAssetNumber(next.assets.at(-1)?.projectNumber ?? 0)}: ${counts.map(([category, count]) => `${count} ${category.toLowerCase()}`).join(', ')}. All categories share this one sequence.`, { kind: 'assets', assetIds: next.assets.map((item) => item.id) }) };
   }
-  if (/missing asset|production risk|what.*need|look ahead|future asset/.test(lower)) {
+  if (/missing asset|production risk|look ahead|future asset/.test(lower)) {
     const critical = next.assets.filter((item) => item.importance === 'Story critical' || item.importance === 'Location anchor');
     const unready = critical.filter((item) => item.lockState !== 'Locked');
     const future = next.sequences.flatMap((item) => item.lookAhead).filter((value, index, all) => all.indexOf(value) === index);
@@ -1394,6 +1439,60 @@ export function interpretStudioMessage(project: StudioProject, input: string): {
   if (referenceLimit > 0) {
     const profile = setSelectedModelReferenceLimit(next, referenceLimit);
     return { project: next, response: message(`The selected ${profile.provider} package now ranks against a maximum of ${profile.maximumReferenceImages} visual references. Dialogue speakers, permanent identities, current appearance, costumes, continuity-critical locations and props, and the previous approved frame are retained by production priority; anything excluded is shown explicitly and is never silently substituted.`, { kind: 'reference-package', sequenceNumber: next.currentSequence }) };
+  }
+
+  if (/refresh (?:the )?provider capabilities|provider capability refresh/.test(lower)) {
+    const profile = next.production.modelCapabilities.find((item) => item.id === next.production.selectedCapabilityProfileId)!;
+    profile.capabilityRevision = `manual-${Date.now()}`;
+    profile.refreshedAt = nowIso();
+    refreshProductionSystem(next);
+    return { project: next, response: message(`${profile.provider} ${profile.model} capability configuration was refreshed as ${profile.capabilityRevision}. Current controls cover duration, resolution, reference count and types, accepted extensions, image-to-video, prompt length, generated in-video sound, and limitation policy. Unknown values still block automatic submission.`, { kind: 'control', sequenceNumber: next.currentSequence }) };
+  }
+
+  const projectLanguageMatch = input.match(/(?:lock|set) (?:the )?project (?:dialogue )?language(?: and dialect)? to (.+?)\s+with\s+(.+?)\s+dialect$/i)
+    ?? input.match(/(?:lock|set) (?:the )?project (?:dialogue )?language(?: and dialect)? to (.+?)$/i);
+  if (projectLanguageMatch) {
+    const language = projectLanguageMatch[1].replace(/\s+with\s+.+?\s+dialect$/i, '').trim();
+    const dialect = projectLanguageMatch[2]?.trim() ?? next.production.control.languageLocks.projectDialect;
+    next.dialogueLanguage = language;
+    next.production.control.languageLocks = { projectLanguage: language, projectDialect: dialect, lockedAt: nowIso() };
+    Object.values(next.production.characterStates).forEach((state) => { state.languageLock = language; state.dialectLock = dialect; });
+    Object.values(next.production.sequencePlans).flatMap((plan) => plan.dialogue).forEach((line) => { line.language = language; line.languageLock = language; line.dialect = dialect; line.dialectLock = dialect; });
+    refreshProductionSystem(next);
+    return { project: next, response: message(`Project dialogue language is locked to ${language} and project dialect to ${dialect}. Character-specific locks may override this only when explicitly recorded. These are script and Seedance prompt metadata, never audio assets.`, { kind: 'dialogue' }) };
+  }
+
+  const languageLockMatch = input.match(/asset\s*0*(\d+)\s+speaks\s+(.+?)\s+with\s+(.+?)\s+dialect(?:\s+in\s+sequence\s+\d+)?$/i)
+    ?? input.match(/asset\s*0*(\d+)\s+speaks\s+(.+?)(?:\s+in\s+sequence\s+\d+)?$/i);
+  if (languageLockMatch) {
+    const character = next.assets.find((item) => item.projectNumber === Number(languageLockMatch[1]) && item.category === 'Characters');
+    if (!character) return { project: next, response: message('Language and dialect locks require a permanent numbered character asset.', { kind: 'dialogue' }) };
+    const state = next.production.characterStates[character.id];
+    state.languageLock = languageLockMatch[2].trim();
+    state.dialectLock = languageLockMatch[3]?.trim() || state.dialectLock;
+    Object.values(next.production.sequencePlans).flatMap((plan) => plan.dialogue).filter((line) => line.speakerAssetId === character.id).forEach((line) => { line.language = state.languageLock; line.languageLock = state.languageLock; line.dialect = state.dialectLock; line.dialectLock = state.dialectLock; });
+    refreshProductionSystem(next);
+    return { project: next, response: message(`Asset ${formatAssetNumber(character.projectNumber)} language is locked to ${state.languageLock} and dialect to ${state.dialectLock}. Existing and future script lines inherit these metadata locks; no audio asset was created.`, { kind: 'dialogue', assetIds: [character.id] }) };
+  }
+
+  const pronunciationMatch = input.match(/pronounce\s+["“]([^"”]+)["”]\s+as\s+["“]([^"”]+)["”]/i);
+  if (sequence && pronunciationMatch) {
+    const lines = next.production.sequencePlans[sequence.id].dialogue.filter((line) => line.exactDialogue.toLowerCase().includes(pronunciationMatch[1].toLowerCase()));
+    if (!lines.length) return { project: next, response: message(`No exact dialogue in ${sequence.id} contains “${pronunciationMatch[1]}”, so the script was not changed.`, { kind: 'dialogue', sequenceNumber: sequence.number }) };
+    lines.forEach((line) => { line.pronunciations = [...line.pronunciations.filter((item) => item.text.toLowerCase() !== pronunciationMatch[1].toLowerCase()), { text: pronunciationMatch[1], pronunciation: pronunciationMatch[2] }]; });
+    refreshProductionSystem(next);
+    return { project: next, response: message(`Pronunciation metadata is locked in ${sequence.id}: “${pronunciationMatch[1]}” → “${pronunciationMatch[2]}” for ${lines.map((line) => line.dialogueId).join(', ')}. Seedance receives it inside the exact dialogue prompt; no voice or audio file exists.`, { kind: 'dialogue', sequenceNumber: sequence.number }) };
+  }
+
+  const nonSpeakingMatch = input.match(/asset\s*0*(\d+)\s+(?:is|must be|remains)\s+non[- ]speaking/i);
+  if (sequence && nonSpeakingMatch) {
+    const character = next.assets.find((item) => item.projectNumber === Number(nonSpeakingMatch[1]) && item.category === 'Characters');
+    if (!character || !sequence.assetIds.includes(character.id)) return { project: next, response: message('The non-speaking lock requires a numbered character already present in that sequence.', { kind: 'dialogue', sequenceNumber: sequence.number }) };
+    const plan = next.production.sequencePlans[sequence.id];
+    plan.dialogue = plan.dialogue.filter((line) => line.speakerAssetId !== character.id);
+    plan.scenario.nonSpeakingCharacterAssetIds = [...new Set([...plan.scenario.nonSpeakingCharacterAssetIds, character.id])];
+    refreshProductionSystem(next);
+    return { project: next, response: message(`Asset ${formatAssetNumber(character.projectNumber)} is present but explicitly non-speaking in ${sequence.id}. Seedance is instructed not to give that character words, lip movement, or another speaker’s line.`, { kind: 'dialogue', sequenceNumber: sequence.number, assetIds: [character.id] }) };
   }
 
   const ownedActionMatch = input.match(/asset\s*0*(\d+)\s+(holds|carries|picks? up|uses|opens|closes|drops|passes)\s+asset\s*0*(\d+)(?:\s+(?:in|with|using)\s+(left|right|both)(?:\s+hand)?)?/i);
@@ -1483,7 +1582,7 @@ export function interpretStudioMessage(project: StudioProject, input: string): {
     const plan = next.production.sequencePlans[sequence.id];
     return { project: next, response: message(`${sequence.id} reference package is ${plan.referencePackage.freshness.toLowerCase()}. ${plan.referencePackage.uploadInstruction} Upload order is deliberate; provider-limit retention prioritizes the previous continuity frame, dialogue speakers, permanent identities, current appearance, costumes, location, and critical props. Every file keeps its permanent project number.`, { kind: 'reference-package', sequenceNumber: sequence.number }) };
   }
-  if (sequence && /use.*(?:latest|last) attachment.*(?:generated|generation|video).*result|(?:generated|generation|video).*result.*(?:latest|last) attachment/.test(lower)) {
+  if (sequence && /use.*(?:latest|last) attachment.*(?:(?:generated|generation|video|sequence).*)?result|(?:generated|generation|video).*result.*(?:latest|last) attachment/.test(lower)) {
     const attachment = next.attachments.at(-1);
     if (!attachment || !attachment.contentType.startsWith('video/')) return { project: next, response: message(`Attach the generated video first, then say “Use latest attachment as ${sequence.id} result.”`, { kind: 'validation', sequenceNumber: sequence.number }) };
     const job = registerGeneratedSequenceResult(next, sequence, attachment.id);
@@ -1527,11 +1626,37 @@ export function interpretStudioMessage(project: StudioProject, input: string): {
     refreshProductionSystem(next);
     return { project: next, response: message(`${job.id} is marked Failed without losing its prompt, numbered references, continuity state, provider/model record, or attempt cost. Retry will reuse those inputs and create another tracked attempt.`, { kind: 'queue', sequenceNumber: sequence.number }) };
   }
+  if (sequence && /(?:confirm|start) (?:paid )?(?:generation|render)/.test(lower)) {
+    const job = next.production.renderQueue.findLast((item) => item.sequenceNumber === sequence.number);
+    if (!job) return { project: next, response: message(`Prepare ${sequence.id} generation first so its exact immutable inputs and cost summary can be reviewed.`, { kind: 'queue', sequenceNumber: sequence.number }) };
+    confirmRenderJob(next, job);
+    return { project: next, response: message(job.status === 'Preparing'
+      ? `Confirmed: ${job.id} is preparing paid attempt ${job.generationCount} for ${sequence.id} with ${job.provider} ${job.model}, ${job.durationSeconds}s, ${job.resolution}, and ${job.estimatedCredits} estimated credit${job.estimatedCredits === 1 ? '' : 's'}. The production freeze and immutable inputs were recorded before submission.`
+      : `${job.id} remains ${job.status}. ${job.failureMessage} No credit was consumed.`, { kind: 'queue', sequenceNumber: sequence.number }) };
+  }
+  if (sequence && /(?:pause|hold) (?:generation|render)/.test(lower)) {
+    const job = next.production.renderQueue.findLast((item) => item.sequenceNumber === sequence.number);
+    if (!job) return { project: next, response: message(`${sequence.id} has no render job to pause.`, { kind: 'queue', sequenceNumber: sequence.number }) };
+    pauseRenderJob(next, job);
+    return { project: next, response: message(`${job.id} is ${job.status}. Its immutable snapshot, prompt, numbered upload order, settings, and continuity state are preserved.`, { kind: 'queue', sequenceNumber: sequence.number }) };
+  }
+  if (sequence && /(?:cancel|stop) (?:generation|render)/.test(lower)) {
+    const job = next.production.renderQueue.findLast((item) => item.sequenceNumber === sequence.number);
+    if (!job) return { project: next, response: message(`${sequence.id} has no render job to cancel.`, { kind: 'queue', sequenceNumber: sequence.number }) };
+    cancelRenderJob(next, job);
+    return { project: next, response: message(`${job.id} is ${job.status}. The preparation record remains auditable and can be retried without losing production state.`, { kind: 'queue', sequenceNumber: sequence.number }) };
+  }
+  if (sequence && /resume (?:generation|render)/.test(lower)) {
+    const job = next.production.renderQueue.findLast((item) => item.sequenceNumber === sequence.number);
+    if (!job) return { project: next, response: message(`${sequence.id} has no paused render job.`, { kind: 'queue', sequenceNumber: sequence.number }) };
+    retryRenderJob(next, job);
+    return { project: next, response: message(`${job.id} is ready for confirmation with the exact preserved inputs. Review the provider, model, duration, resolution, sequence, and one-credit estimate before restarting.`, { kind: 'queue', sequenceNumber: sequence.number }) };
+  }
   if (sequence && /retry/.test(lower)) {
     const job = next.production.renderQueue.findLast((item) => item.sequenceNumber === sequence.number);
     if (!job) return { project: next, response: message(`${sequence.id} has no failed render job. Prepare generation first.`, { kind: 'queue', sequenceNumber: sequence.number }) };
     retryRenderJob(next, job);
-    return { project: next, response: message(`${job.id} is waiting for retry attempt ${job.generationCount}. The exact prompt, reference package, continuity state, provider/model target, and prior failure history are preserved.`, { kind: 'queue', sequenceNumber: sequence.number }) };
+    return { project: next, response: message(`${job.id} is awaiting confirmation for the next retry. The attempt counter and credit estimate do not advance until a connected provider actually starts the confirmed generation. Exact inputs and prior failure history are preserved.`, { kind: 'queue', sequenceNumber: sequence.number }) };
   }
   if (sequence && /scene graph|relationships|knowledge graph/.test(lower)) {
     return { project: next, response: message(`${sequence.id} contains ${sequence.sceneGraph.nodes.length} scene nodes and ${sequence.sceneGraph.edges.length} explicit relationships linking identities, costumes, held objects, animals, locations, environments, furniture, lighting, and sequence membership.`, { kind: 'graph', sequenceNumber: sequence.number }) };
@@ -1572,6 +1697,15 @@ export function interpretStudioMessage(project: StudioProject, input: string): {
     if (next.sequences.every((item) => item.status === 'Approved')) next.stage = 'Assembly';
     return { project: next, response: message(`${sequence.id} revision V${String(checkpoint.sequenceRevision).padStart(2, '0')} is approved and locked. Checkpoint ${checkpoint.id} preserves asset, spatial, physical, environmental, lighting, time, Seedance sound-instruction, entry/exit, and object states as the expected opening for ${following?.id ?? 'final assembly'}.${checkpoint.lastFrameKey ? ` The generated result supplied continuity frame ${checkpoint.lastFrameKey} automatically.` : ' Import the generated video result to create its first-frame and last-frame continuity keys automatically.'}`, { kind: 'validation', sequenceNumber: sequence.number }) };
   }
+  if (sequence && /prepare (?:an )?(?:external )?(?:seedance )?(?:package|workflow)/.test(lower)) {
+    const job = queueSequenceGeneration(next, sequence);
+    if (next.production.sequencePlans[sequence.id].readinessChecklist.readyForGeneration) {
+      job.status = 'External';
+      job.failureMessage = 'Prepared for external Seedance. No provider call or credit spend occurs in Continuity Studio.';
+    }
+    const plan = next.production.sequencePlans[sequence.id];
+    return { project: next, response: message(`${sequence.id} external Seedance package is ${job.status.toLowerCase()}. ${plan.referencePackage.uploadInstruction} Then paste the provider translation and generate outside the Studio. Attach the finished video here and say “Use latest attachment as ${sequence.id} result” to validate, approve, extract the ending-frame key, and continue.`, { kind: 'reference-package', sequenceNumber: sequence.number }) };
+  }
   if (sequence && /generate/.test(lower)) {
     const blockers: string[] = [];
     if (next.story.status !== 'Approved') blockers.push('story approval');
@@ -1583,7 +1717,7 @@ export function interpretStudioMessage(project: StudioProject, input: string): {
     if (blockers.length) return { project: next, response: message(`${sequence.id} is safe, but generation is blocked by ${blockers.join(', ')}. I kept its prompt and all existing work unchanged.`, { kind: 'sequence', sequenceNumber: sequence.number }) };
     const job = queueSequenceGeneration(next, sequence);
     next.stage = 'Generation';
-    return { project: next, response: message(`${sequence.id} is now ${job.status} in the render queue as ${job.id}. The job preserves its provider/model target, ${job.durationSeconds}s timing, ${job.resolution} request, prompt version, exact numbered references, continuity state, attempt count, and credit/cost fields.${job.failureMessage ? ` ${job.failureMessage}` : ''}`, { kind: 'queue', sequenceNumber: sequence.number }) };
+    return { project: next, response: message(`${sequence.id} is prepared as ${job.id} and is ${job.status}. Cost protection: provider ${job.provider}; model ${job.model}; duration ${job.durationSeconds}s; resolution ${job.resolution}; sequence ${job.sequenceNumber}; estimated next attempt 1 credit. No credit has been used. Confirm or cancel after reviewing this summary.${job.failureMessage ? ` ${job.failureMessage}` : ''}`, { kind: 'queue', sequenceNumber: sequence.number }) };
   }
   if (sequence && /(show|prompt|seedance)/.test(lower)) {
     const plan = next.production.sequencePlans[sequence.id];
@@ -1719,6 +1853,21 @@ export function interpretStudioMessage(project: StudioProject, input: string): {
   if (/movie completion audit|completion audit|chronological audit/.test(lower)) {
     const audit = next.production.completionAudit;
     return { project: next, response: message(`Movie completion audit is ${audit.status.toLowerCase()}. ${audit.checks.map((check) => `${check.name}: ${check.status}`).join('; ')}. It covers story logic, scenarios, dialogue ownership and knowledge, permanent visual assets, props, wardrobe, damage, transformations, environment, locations, time, transitions, camera handoffs, setups/payoffs, repetition, and the approved continuity chain.`, { kind: 'readiness', sequenceNumber: next.currentSequence }) };
+  }
+
+  if (/what (?:is|'s) missing|full project integrity|integrity audit|self[- ]check/.test(lower)) {
+    const audit = next.production.control.integrityAudit;
+    const bindingBlockers = next.production.control.referenceBindingFindings.filter((item) => item.severity === 'Blocking');
+    const timingFailures = Object.values(next.production.control.dialogueTimingAudits).filter((item) => !item.fits);
+    const missing = [...audit.missing, ...bindingBlockers.map((item) => `Sequence ${item.sequenceNumber}: ${item.message}`), ...timingFailures.map((item) => `Sequence ${item.sequenceNumber}: ${item.message}`)];
+    return { project: next, response: message(missing.length
+      ? `Real project self-check found ${missing.length} unresolved item${missing.length === 1 ? '' : 's'}: ${missing.join(' ')}`
+      : `Real project self-check passed. Permanent numbers, sequence links, dialogue timing, speaker/action/category bindings, approved render source mapping, and attachment links are internally consistent. Storage file existence is rechecked during export.`, { kind: 'integrity', sequenceNumber: next.currentSequence }) };
+  }
+
+  if (/change log|what changed|decision log/.test(lower)) {
+    const entries = next.production.control.changeLog.slice(-8);
+    return { project: next, response: message(entries.length ? entries.map((entry) => `r${entry.revision} ${entry.scope}: ${entry.summary}`).join(' ') : 'No persisted production changes are logged yet.', { kind: 'control' }) };
   }
 
   if (/render queue|generation queue|cost|credits/.test(lower)) {

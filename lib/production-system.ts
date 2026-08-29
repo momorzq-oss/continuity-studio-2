@@ -22,6 +22,11 @@ import type {
   SequenceScenario,
   StoryThread,
 } from './scenario-engine';
+import {
+  createFreezeSnapshot,
+  initializeProductionControl,
+} from './production-control';
+import type { ProductionControlSystem } from './production-control';
 
 export type { DialogueLine } from './scenario-engine';
 
@@ -34,7 +39,7 @@ export type ProductionReadiness =
   | 'Production In Progress'
   | 'Final Review'
   | 'Completed';
-export type RenderStatus = 'Waiting' | 'Preparing' | 'Generating' | 'Completed' | 'Failed' | 'Needs Review' | 'Approved';
+export type RenderStatus = 'Awaiting Confirmation' | 'Waiting' | 'Paused' | 'Cancelled' | 'External' | 'Preparing' | 'Generating' | 'Completed' | 'Failed' | 'Needs Review' | 'Approved';
 
 export interface DependencyImpact {
   id: string;
@@ -89,6 +94,7 @@ export interface SequenceReferencePackage {
   assetNumbers: number[];
   assetFiles: string[];
   previousApprovedSequence: string | null;
+  previousApprovedVideoKey: string | null;
   previousEndingFrameKey: string | null;
   prompt: string;
   dialogue: DialogueLine[];
@@ -237,6 +243,10 @@ export interface ModelCapabilityProfile {
   generatedSoundInVideo: 'Unknown' | 'Supported' | 'Unsupported';
   promptCharacterLimit: number | null;
   imageToVideo: 'Unknown' | 'Supported' | 'Unsupported';
+  supportedReferenceTypes: string[];
+  supportedFileExtensions: string[];
+  capabilityRevision: string;
+  refreshedAt: string;
   limitationPolicy: string;
 }
 
@@ -262,7 +272,7 @@ export interface FinalQualityReport {
 }
 
 export interface ProductionSystem {
-  schemaVersion: 2;
+  schemaVersion: 3;
   pipelineStages: string[];
   currentPipelineStage: string;
   readiness: ProductionReadiness;
@@ -291,6 +301,7 @@ export interface ProductionSystem {
   costLedger: { estimatedCredits: number; estimatedCostUsd: number; actualCostUsd: number; generationCount: number; pricingStatus: string };
   finalAssembly: FinalAssemblyPlan;
   finalQuality: FinalQualityReport;
+  control: ProductionControlSystem;
   autosave: { enabled: true; lastSavedAt: string; recoverySnapshotCount: number; lastRecoveryReason: string };
 }
 
@@ -391,18 +402,26 @@ function modelProfiles(project: StudioProject, previous?: ModelCapabilityProfile
   if (previous?.length) return previous.map((profile) => ({
     ...profile,
     generatedSoundInVideo: profile.generatedSoundInVideo ?? 'Unknown',
+    supportedReferenceTypes: profile.supportedReferenceTypes ?? ['image', 'previous-video', 'previous-ending-frame'],
+    supportedFileExtensions: profile.supportedFileExtensions ?? ['png', 'jpg', 'jpeg', 'webp', 'mp4', 'mov'],
+    capabilityRevision: profile.capabilityRevision ?? 'unverified-1',
+    refreshedAt: profile.refreshedAt ?? project.updatedAt,
   }));
   return [
     {
       id: 'video-adapter-unconfigured', provider: project.settings.videoProvider, model: 'Provider model not selected', connectionStatus: 'Not connected' as const,
       maximumDurationSeconds: null, supportedDurations: [], supportedResolutions: [], referenceImageSupport: 'Unknown' as const,
       maximumReferenceImages: null, generatedSoundInVideo: 'Unknown' as const, promptCharacterLimit: null, imageToVideo: 'Unknown' as const,
+      supportedReferenceTypes: ['image', 'previous-video', 'previous-ending-frame'], supportedFileExtensions: ['png', 'jpg', 'jpeg', 'webp', 'mp4', 'mov'],
+      capabilityRevision: 'unverified-1', refreshedAt: project.updatedAt,
       limitationPolicy: 'Capability values must be loaded from the connected provider adapter before execution. Unknown limits block automatic submission but never discard the prepared job.',
     },
     {
       id: 'image-adapter-unconfigured', provider: project.settings.imageProvider, model: 'Provider model not selected', connectionStatus: 'Not connected' as const,
       maximumDurationSeconds: null, supportedDurations: [], supportedResolutions: [], referenceImageSupport: 'Unknown' as const,
       maximumReferenceImages: null, generatedSoundInVideo: 'Unknown' as const, promptCharacterLimit: null, imageToVideo: 'Unknown' as const,
+      supportedReferenceTypes: ['image'], supportedFileExtensions: ['png', 'jpg', 'jpeg', 'webp'],
+      capabilityRevision: 'unverified-1', refreshedAt: project.updatedAt,
       limitationPolicy: 'The asset generation adapter must publish its reference, resolution, prompt, cost, and output limits before automatic execution.',
     },
   ];
@@ -451,8 +470,11 @@ function latestCheckpoint(system: ProductionSystem | undefined, sequenceNumber: 
 
 function referencePackage(project: StudioProject, sequence: StudioSequence, dialogue: DialogueLine[], profile: ModelCapabilityProfile, prompt: string, previous?: ProductionSystem): SequenceReferencePackage {
   const checkpoint = latestCheckpoint(previous, sequence.number - 1);
+  const previousApprovedVideoKey = previous?.control?.finalSourceMap.find((item) => item.sequenceNumber === sequence.number - 1)?.resultMediaKey
+    ?? previous?.renderQueue.findLast((item) => item.sequenceNumber === sequence.number - 1 && item.status === 'Approved')?.resultMediaKey
+    ?? null;
   const negativeConstraints = [...NEGATIVE_CONTINUITY_RULES, ...project.filmBible.negativeRules];
-  const rankedReferences = rankSequenceReferences(project, sequence, dialogue, checkpoint?.lastFrameKey ?? null, profile.maximumReferenceImages);
+  const rankedReferences = rankSequenceReferences(project, sequence, dialogue, checkpoint?.lastFrameKey ?? null, profile.maximumReferenceImages, previousApprovedVideoKey);
   const included = rankedReferences.filter((item) => item.included);
   return {
     packageId: `${sequence.id}:reference-package:v${sequence.version}`,
@@ -460,6 +482,7 @@ function referencePackage(project: StudioProject, sequence: StudioSequence, dial
     assetNumbers: [...sequence.assetNumbers],
     assetFiles: [...sequence.assetFiles],
     previousApprovedSequence: sequence.number > 1 ? `SEQUENCE_${formatNumber(sequence.number - 1)}` : null,
+    previousApprovedVideoKey,
     previousEndingFrameKey: checkpoint?.lastFrameKey ?? null,
     prompt,
     dialogue,
@@ -558,8 +581,10 @@ function readiness(project: StudioProject, system: ProductionSystem): { status: 
   const currentJob = system.renderQueue.findLast((job) => job.sequenceNumber === current?.number);
   if (system.finalAssembly.status === 'Approved' && system.finalQuality.status === 'Passed') return { status: 'Completed', action: 'Export the complete portable archive and the separate flat numbered asset folder.', stage: 'EXPORT' };
   if (project.sequences.every((sequence) => sequence.status === 'Approved')) return { status: 'Final Review', action: 'Build the ordered final assembly and run the final quality check.', stage: 'FINAL ASSEMBLY' };
-  if (currentJob && ['Waiting', 'Preparing', 'Generating', 'Completed', 'Failed', 'Needs Review'].includes(currentJob.status)) {
+  if (currentJob && ['Awaiting Confirmation', 'Waiting', 'Paused', 'Preparing', 'Generating', 'Completed', 'Failed', 'Needs Review'].includes(currentJob.status)) {
     const action = currentJob.status === 'Failed' ? `Retry ${currentJob.id}; its exact prompt, references, and continuity state are preserved.`
+      : currentJob.status === 'Awaiting Confirmation' ? `Review the visible cost summary and confirm or cancel Sequence ${current?.number}; no credit has been used.`
+        : currentJob.status === 'Paused' ? `Resume or cancel Sequence ${current?.number}; its immutable inputs remain preserved.`
       : currentJob.status === 'Completed' || currentJob.status === 'Needs Review' ? `Validate Sequence ${current?.number} against its expected references and checkpoint.`
         : `Continue the queued production job for Sequence ${current?.number}.`;
     return { status: 'Production In Progress', action, stage: currentJob.status === 'Completed' ? 'VISUAL VALIDATION' : 'VIDEO GENERATION' };
@@ -644,8 +669,8 @@ export function initializeProductionSystem(project: StudioProject): ProductionSy
   finalAssembly.soundContinuityPlan ??= ['Seedance generates requested sound inside each video; Continuity Studio exports instructions and continuity state only.'];
   finalAssembly.missingSequenceNumbers = project.sequences.filter((sequence) => sequence.status !== 'Approved').map((sequence) => sequence.number);
   finalAssembly.status = finalAssembly.missingSequenceNumbers.length ? 'Blocked' : finalAssembly.status === 'Approved' ? 'Approved' : 'Ready';
-  const system: ProductionSystem = {
-    schemaVersion: 2, pipelineStages: [...PIPELINE_STAGES], currentPipelineStage: 'STORY', readiness: 'Story Ready', nextLogicalAction: '',
+  const system = {
+    schemaVersion: 3, pipelineStages: [...PIPELINE_STAGES], currentPipelineStage: 'STORY', readiness: 'Story Ready', nextLogicalAction: '',
     storyLock: previous?.storyLock ?? { status: 'Unlocked', lockedAt: null, reason: 'Story remains editable until production begins.' },
     dependencies: dependencyGraph(project, previous), sequencePlans, characterStates, storyThreads, repetitionFindings, correctionMemory,
     generationSnapshots: previous?.generationSnapshots ?? [], completionAudit: buildMovieCompletionAudit(project, scenarios, repetitionFindings, storyThreads),
@@ -654,8 +679,11 @@ export function initializeProductionSystem(project: StudioProject): ProductionSy
     renderQueue, validations: previous?.validations ?? [], corrections: previous?.corrections ?? [], checkpoints: previous?.checkpoints ?? [],
     modelCapabilities: capabilities, selectedCapabilityProfileId, costLedger, finalAssembly,
     finalQuality: qualityReport(project, previous?.finalQuality),
+    control: previous?.control,
     autosave: previous?.autosave ?? { enabled: true, lastSavedAt: project.updatedAt, recoverySnapshotCount: 0, lastRecoveryReason: 'Project created' },
-  };
+  } as ProductionSystem;
+  project.production = system;
+  system.control = initializeProductionControl(project, previous?.control);
   const state = readiness(project, system);
   system.readiness = state.status;
   system.nextLogicalAction = state.action;
@@ -753,10 +781,10 @@ export function queueSequenceGeneration(project: StudioProject, sequence: Studio
   project.production ??= initializeProductionSystem(project);
   const plan = project.production.sequencePlans[sequence.id];
   const profile = project.production.modelCapabilities.find((item) => item.id === project.production.selectedCapabilityProfileId)!;
-  const existing = project.production.renderQueue.findLast((item) => item.sequenceNumber === sequence.number && !['Failed', 'Approved'].includes(item.status));
+  const existing = project.production.renderQueue.findLast((item) => item.sequenceNumber === sequence.number && !['Failed', 'Cancelled', 'Approved'].includes(item.status));
   if (existing) return existing;
   const at = nowIso();
-  const blocking = !plan.readinessChecklist.readyForGeneration || plan.conflicts.some((conflict) => conflict.severity === 'Blocking' && conflict.status === 'Open') || ['Outdated', 'Needs Review', 'Missing Reference'].includes(plan.freshness);
+  const blocking = !plan.readinessChecklist.readyForGeneration || plan.conflicts.some((conflict) => conflict.severity === 'Blocking' && conflict.status === 'Open') || ['Outdated', 'Missing Reference'].includes(plan.freshness);
   const snapshot: GenerationSnapshot = {
     id: uid('generation_snapshot'), sequenceNumber: sequence.number, createdAt: at,
     scenario: structuredClone(plan.scenario), dialogue: structuredClone(plan.dialogue), referencePackageId: plan.referencePackage.packageId,
@@ -767,16 +795,16 @@ export function queueSequenceGeneration(project: StudioProject, sequence: Studio
   project.production.generationSnapshots.push(snapshot);
   const job: RenderQueueItem = {
     id: uid('render'), targetId: sequence.id, sequenceNumber: sequence.number,
-    status: blocking || profile.connectionStatus !== 'Connected' ? 'Waiting' : 'Preparing', provider: profile.provider, model: profile.model,
-    durationSeconds: sequence.duration, resolution: project.resolution, generationCount: 1, estimatedCredits: 1,
+    status: blocking ? 'Waiting' : 'Awaiting Confirmation', provider: profile.provider, model: profile.model,
+    durationSeconds: sequence.duration, resolution: project.resolution, generationCount: 0, estimatedCredits: 0,
     estimatedCostUsd: null, actualCostUsd: null, prompt: plan.compiledPrompt, referencePackageId: plan.referencePackage.packageId, generationSnapshotId: snapshot.id,
     assetNumbers: [...sequence.assetNumbers], continuityState: plan.referencePackage.continuityInstruction,
-    failureMessage: blocking ? plan.readinessChecklist.blockers.join(' ') || 'Blocked by unresolved prompt or dependency conflicts.' : profile.connectionStatus !== 'Connected' ? 'Video provider capability profile is not connected.' : null,
+    failureMessage: blocking ? plan.readinessChecklist.blockers.join(' ') || 'Blocked by unresolved prompt or dependency conflicts.' : 'Paid generation has not started. Confirm the visible provider, model, duration, resolution, sequence, and one-credit estimate first.',
     retryHistory: [], resultMediaKey: null, continuityFrameKey: null, createdAt: at, updatedAt: at,
   };
   project.production.renderQueue.push(job);
   project.production.storyLock = { status: 'Locked', lockedAt: project.production.storyLock.lockedAt ?? at, reason: 'Production started; story changes now create dependency impacts instead of overwriting approved work.' };
-  sequence.status = job.status === 'Preparing' ? 'Generating' : 'Ready';
+  sequence.status = 'Ready';
   refreshProductionSystem(project);
   return job;
 }
@@ -784,11 +812,51 @@ export function queueSequenceGeneration(project: StudioProject, sequence: Studio
 export function retryRenderJob(project: StudioProject, job: RenderQueueItem) {
   const at = nowIso();
   job.retryHistory.push({ attempt: job.generationCount, at, reason: job.failureMessage ?? 'Targeted retry requested' });
-  job.generationCount += 1;
-  job.estimatedCredits += 1;
-  job.status = 'Waiting';
-  job.failureMessage = 'Exact prompt, numbered reference package, and continuity state preserved; waiting for a compatible connected provider.';
+  job.status = 'Awaiting Confirmation';
+  job.failureMessage = 'Exact prompt, numbered references, provider settings, and continuity state are preserved. Confirm the next paid attempt before any credit can be used.';
   job.updatedAt = at;
+  refreshProductionSystem(project);
+  return job;
+}
+
+export function confirmRenderJob(project: StudioProject, job: RenderQueueItem) {
+  project.production ??= initializeProductionSystem(project);
+  const profile = project.production.modelCapabilities.find((item) => item.id === project.production.selectedCapabilityProfileId);
+  if (!['Awaiting Confirmation', 'Paused', 'Failed'].includes(job.status)) return job;
+  if (!project.production.control.freezeSnapshots.length) {
+    project.production.control.freezeSnapshots.push(createFreezeSnapshot(project, `Production baseline frozen before the first confirmed paid generation attempt for Sequence ${job.sequenceNumber}.`));
+  }
+  const at = nowIso();
+  if (!profile || profile.connectionStatus !== 'Connected') {
+    job.status = 'Waiting';
+    job.failureMessage = 'Confirmation recorded, but no compatible provider is connected. No generation attempt or credit was consumed.';
+  } else {
+    job.status = 'Preparing';
+    job.generationCount += 1;
+    job.estimatedCredits += 1;
+    job.failureMessage = null;
+    const sequence = project.sequences.find((item) => item.number === job.sequenceNumber);
+    if (sequence) sequence.status = 'Generating';
+  }
+  job.updatedAt = at;
+  refreshProductionSystem(project);
+  return job;
+}
+
+export function pauseRenderJob(project: StudioProject, job: RenderQueueItem) {
+  if (!['Preparing', 'Generating', 'Waiting'].includes(job.status)) return job;
+  job.status = 'Paused';
+  job.failureMessage = 'Paused with the immutable generation snapshot, prompt, reference order, provider settings, and continuity state preserved.';
+  job.updatedAt = nowIso();
+  refreshProductionSystem(project);
+  return job;
+}
+
+export function cancelRenderJob(project: StudioProject, job: RenderQueueItem) {
+  if (['Approved', 'Completed'].includes(job.status)) return job;
+  job.status = 'Cancelled';
+  job.failureMessage = 'Cancelled. The immutable preparation snapshot remains available for retry or audit; text and production state were not discarded.';
+  job.updatedAt = nowIso();
   refreshProductionSystem(project);
   return job;
 }
@@ -807,6 +875,22 @@ export function registerGeneratedSequenceResult(project: StudioProject, sequence
   plan.actualOpeningFrame = `${mediaKey}#first-frame`;
   plan.lastFrameKey = job.continuityFrameKey;
   sequence.status = 'Generated';
+  const provenanceId = uid('provenance');
+  project.production.control.resultProvenance.push({
+    id: provenanceId,
+    sequenceNumber: sequence.number,
+    sequenceVersion: sequence.version,
+    assetVersions: sequence.assetIds.map((assetId) => project.assets.find((asset) => asset.id === assetId)).filter((asset): asset is StudioAsset => Boolean(asset)).map((asset) => ({ assetId: asset.id, assetNumber: asset.projectNumber, version: asset.version, fileName: asset.generatedFileName })),
+    scenarioVersion: plan.revision,
+    dialogueIds: plan.dialogue.map((line) => line.dialogueId),
+    prompt: job.prompt,
+    provider: job.provider,
+    model: job.model,
+    settings: { durationSeconds: job.durationSeconds, resolution: job.resolution, referencePackageId: job.referencePackageId },
+    generationSnapshotId: job.generationSnapshotId,
+    resultMediaKey: mediaKey,
+    createdAt: nowIso(),
+  });
   refreshProductionSystem(project);
   return job;
 }
@@ -900,6 +984,15 @@ export function approveSequenceAndCheckpoint(project: StudioProject, sequence: S
     followingPlan.referencePackage.freshness = checkpoint.lastFrameKey ? 'Ready' : 'Missing Reference';
   }
   project.production.storyLock = { status: 'Locked', lockedAt: project.production.storyLock.lockedAt ?? at, reason: 'An approved sequence now depends on the locked story baseline.' };
+  const job = project.production.renderQueue.findLast((item) => item.sequenceNumber === sequence.number && Boolean(item.resultMediaKey));
+  const provenance = project.production.control.resultProvenance.findLast((item) => item.sequenceNumber === sequence.number && item.resultMediaKey === job?.resultMediaKey);
+  if (job?.resultMediaKey && provenance) {
+    project.production.control.finalSourceMap = [
+      ...project.production.control.finalSourceMap.filter((item) => item.sequenceNumber !== sequence.number),
+      { sequenceNumber: sequence.number, sequenceVersion: sequence.version, resultMediaKey: job.resultMediaKey, provenanceId: provenance.id, approvedAt: at },
+    ].sort((a, b) => a.sequenceNumber - b.sequenceNumber);
+    job.status = 'Approved';
+  }
   refreshProductionSystem(project);
   return checkpoint;
 }

@@ -20,17 +20,22 @@ export async function GET(request: Request) {
     const projectId = new URL(request.url).searchParams.get('projectId');
     if (!projectId) return Response.json({ error: 'Choose a project to export.' }, { status: 400 });
     const { DB, FILES } = getRuntimeEnv();
-    const row = await DB.prepare('SELECT state_json FROM projects WHERE id = ?')
+    const row = await DB.prepare(`SELECT p.state_json, COALESCE(t.revision, 0) AS revision FROM projects p
+      LEFT JOIN project_transactions t ON t.project_id = p.id WHERE p.id = ?`)
       .bind(projectId)
-      .first<{ state_json: string }>();
+      .first<{ state_json: string; revision: number }>();
     if (!row) return Response.json({ error: 'That project is no longer available.' }, { status: 404 });
     const project = normalizeProject(JSON.parse(row.state_json) as StudioProject);
+    project.storageRevision = row.revision;
     const messages = await DB.prepare(
       'SELECT id, role, content, metadata_json, created_at FROM chat_messages WHERE project_id = ? ORDER BY created_at ASC',
     ).bind(projectId).all();
     const references = await DB.prepare(
-      "SELECT id, asset_id, original_name, media_key, content_type, byte_size, role, created_at FROM asset_references WHERE project_id = ? AND content_type NOT LIKE 'audio/%' ORDER BY created_at ASC",
-    ).bind(projectId).all<{ id: string; asset_id: string | null; original_name: string; media_key: string; content_type: string; byte_size: number; role: string; created_at: string }>();
+      `SELECT ar.id, ar.asset_id, ar.original_name, ar.media_key, ar.content_type, ar.byte_size, ar.role, ar.created_at,
+        fi.fingerprint_sha256, fi.preview_kind, fi.integrity_status
+       FROM asset_references ar LEFT JOIN file_integrity fi ON fi.reference_id = ar.id
+       WHERE ar.project_id = ? AND ar.content_type NOT LIKE 'audio/%' ORDER BY ar.created_at ASC`,
+    ).bind(projectId).all<{ id: string; asset_id: string | null; original_name: string; media_key: string; content_type: string; byte_size: number; role: string; created_at: string; fingerprint_sha256: string | null; preview_kind: string | null; integrity_status: string | null }>();
     const jobs = await DB.prepare(
       'SELECT id, target_id, provider, model, prompt_version, status, failure_message, started_at, updated_at FROM generation_jobs WHERE project_id = ? ORDER BY started_at ASC',
     ).bind(projectId).all();
@@ -41,6 +46,15 @@ export async function GET(request: Request) {
       'SELECT id, reason, state_json, created_at FROM project_recovery_snapshots WHERE project_id = ? ORDER BY created_at ASC',
     ).bind(projectId).all<{ id: string; reason: string; state_json: string; created_at: string }>();
     const root = safeName(project.title);
+    const missingStoredFiles: string[] = [];
+    for (const reference of references.results) if (!(await FILES.head(reference.media_key))) missingStoredFiles.push(`${reference.id} (${reference.original_name})`);
+    project.production.control.integrityAudit.checks = [
+      ...project.production.control.integrityAudit.checks.filter((check) => check.id !== 'stored-files'),
+      { id: 'stored-files', status: missingStoredFiles.length ? 'Failed' : 'Passed', label: 'Original stored files', detail: missingStoredFiles.length ? `Missing: ${missingStoredFiles.join(', ')}` : `${references.results.length} referenced original file(s) verified in project storage.` },
+    ];
+    project.production.control.integrityAudit.missing = project.production.control.integrityAudit.checks.filter((check) => check.status !== 'Passed').map((check) => `${check.label}: ${check.detail}`);
+    project.production.control.integrityAudit.status = project.production.control.integrityAudit.missing.length ? 'Failed' : 'Passed';
+    project.production.control.integrityAudit.createdAt = nowIso();
     const files: Record<string, Uint8Array> = {
       [`${root}/project.json`]: text(project),
       [`${root}/PROJECT_SUMMARY.md`]: text(`# ${project.title}\n\n${project.story.logline}\n\n- Duration: ${project.durationSeconds / 60} minutes\n- Sequences: ${project.sequenceCount}\n- Genre: ${project.genre} / ${project.subgenre}\n- Story: ${project.story.status}\n- World Bible: ${project.worldBible.status}\n- Film Bible: ${project.filmBible.status}\n- Structured locations: ${project.locations.length}\n- Environment states: ${project.environments.length}\n- Knowledge relationships: ${project.knowledgeGraph.edges.length}\n- Asset state events: ${project.stateEvents.length}\n- Continuity: ${project.continuity.status}\n- Production readiness: ${project.production.readiness}\n- Pipeline stage: ${project.production.currentPipelineStage}\n- Dependency impacts: ${project.production.dependencies.filter((item) => item.freshness !== 'Current').length}\n- Render jobs: ${project.production.renderQueue.length}\n- Validation reports: ${project.production.validations.length}\n- Continuity checkpoints: ${project.production.checkpoints.length}\n- Recovery snapshots: ${recoverySnapshots.results.length}\n- Flat asset folder: ${project.flatAssetFolder.folderName}\n- Asset naming: ${project.flatAssetFolder.namingFormat}\n- Asset subfolders: forbidden\n`),
@@ -74,6 +88,15 @@ export async function GET(request: Request) {
       [`${root}/reports/chat_history.json`]: text(messages.results),
       [`${root}/reports/generation_history.json`]: text(jobs.results),
       [`${root}/production/production_system.json`]: text(project.production),
+      [`${root}/production/production_control.json`]: text(project.production.control),
+      [`${root}/production/explicit_sequence_dependencies.json`]: text(project.production.control.sequenceDependencies),
+      [`${root}/production/provider_translations.json`]: text(project.production.control.providerTranslations),
+      [`${root}/production/production_freezes.json`]: text(project.production.control.freezeSnapshots),
+      [`${root}/production/result_provenance.json`]: text(project.production.control.resultProvenance),
+      [`${root}/final_assembly/final_sequence_source_map.json`]: text(project.production.control.finalSourceMap),
+      [`${root}/reports/PROJECT_INTEGRITY_AUDIT.json`]: text(project.production.control.integrityAudit),
+      [`${root}/reports/CHANGE_LOG.json`]: text(project.production.control.changeLog),
+      [`${root}/reports/IMPORT_HISTORY.json`]: text(project.production.control.importHistory),
       [`${root}/production/dependency_impacts.json`]: text(project.production.dependencies),
       [`${root}/production/render_queue.json`]: text(project.production.renderQueue),
       [`${root}/production/cost_ledger.json`]: text(project.production.costLedger),
@@ -155,11 +178,27 @@ export async function GET(request: Request) {
     await FILES.put(mediaKey, zipped, { httpMetadata: { contentType: 'application/zip' } });
     project.exportStatus = 'Exported';
     project.updatedAt = createdAt;
+    const expectedRevision = row.revision;
+    project.storageRevision = expectedRevision + 1;
+    const transactionId = crypto.randomUUID();
+    const snapshotId = crypto.randomUUID();
+    const changeId = `change_${crypto.randomUUID()}`;
+    const summary = `Exported full project archive ${filename}; integrity ${project.production.control.integrityAudit.status}.`;
+    project.production.control.changeLog.push({ id: changeId, revision: project.storageRevision, scope: 'export', summary, createdAt });
     await DB.batch([
+      DB.prepare(`INSERT INTO transaction_guards (id, project_id, revision_ok, created_at)
+        SELECT ?, ?, CASE WHEN revision = ? THEN 1 ELSE 0 END, ? FROM project_transactions WHERE project_id = ?`)
+        .bind(transactionId, projectId, expectedRevision, createdAt, projectId),
+      DB.prepare('INSERT INTO project_recovery_snapshots (id, project_id, reason, state_json, created_at) VALUES (?, ?, ?, ?, ?)')
+        .bind(snapshotId, projectId, summary, row.state_json, createdAt),
       DB.prepare('INSERT INTO export_jobs (id, project_id, status, media_key, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)')
         .bind(exportId, projectId, 'Completed', mediaKey, createdAt, createdAt),
       DB.prepare('UPDATE projects SET export_status = ?, state_json = ?, updated_at = ? WHERE id = ?')
         .bind(project.exportStatus, JSON.stringify(project), createdAt, projectId),
+      DB.prepare('UPDATE project_transactions SET revision = ?, last_transaction_id = ?, updated_at = ? WHERE project_id = ?')
+        .bind(project.storageRevision, transactionId, createdAt, projectId),
+      DB.prepare('INSERT INTO production_change_log (id, project_id, revision, scope, summary, before_snapshot_id, after_state_hash, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+        .bind(changeId, projectId, project.storageRevision, 'export', summary, snapshotId, `${JSON.stringify(project).length.toString(16)}-${createdAt}`, createdAt),
     ]);
     return new Response(zipped, {
       headers: {

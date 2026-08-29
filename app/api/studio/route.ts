@@ -22,10 +22,15 @@ function json(data: unknown, init?: ResponseInit) {
 
 async function loadProject(projectId: string) {
   const { DB } = getRuntimeEnv();
-  const row = await DB.prepare('SELECT state_json FROM projects WHERE id = ? AND archived = 0')
+  const row = await DB.prepare(`SELECT p.state_json, COALESCE(t.revision, 0) AS revision
+    FROM projects p LEFT JOIN project_transactions t ON t.project_id = p.id
+    WHERE p.id = ? AND p.archived = 0`)
     .bind(projectId)
-    .first<{ state_json: string }>();
-  return row ? normalizeProject(JSON.parse(row.state_json) as StudioProject) : null;
+    .first<{ state_json: string; revision: number }>();
+  if (!row) return null;
+  const project = normalizeProject(JSON.parse(row.state_json) as StudioProject);
+  project.storageRevision = row.revision;
+  return project;
 }
 
 async function loadMessages(projectId: string) {
@@ -61,9 +66,7 @@ function messageInsert(projectId: string, item: StudioMessage) {
 
 async function runBatches(statements: D1PreparedStatement[]) {
   const { DB } = getRuntimeEnv();
-  for (let index = 0; index < statements.length; index += 60) {
-    await DB.batch(statements.slice(index, index + 60));
-  }
+  if (statements.length) await DB.batch(statements);
 }
 
 function intelligenceStatements(project: StudioProject) {
@@ -176,11 +179,44 @@ function intelligenceStatements(project: StudioProject) {
           JSON.stringify(plan?.referencePackage ?? {}), job.status, job.failureMessage,
           JSON.stringify(job.retryHistory), job.createdAt, job.updatedAt),
     );
+    if (job.resultMediaKey) {
+      const provenance = project.production.control.resultProvenance.findLast((item) => item.sequenceNumber === job.sequenceNumber && item.resultMediaKey === job.resultMediaKey);
+      statements.push(DB.prepare(`INSERT INTO generation_results (id, job_id, media_key, metadata_json, created_at)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET media_key = excluded.media_key, metadata_json = excluded.metadata_json`)
+        .bind(`${job.id}:result`, job.id, job.resultMediaKey, JSON.stringify(provenance ?? { generationSnapshotId: job.generationSnapshotId }), job.updatedAt));
+    }
   }
   for (const report of project.production.validations) statements.push(productionRecord('validation', report.id, report.status, report.sequenceNumber, report));
   for (const correction of project.production.corrections) statements.push(productionRecord('correction', correction.id, correction.status, correction.sequenceNumber, correction));
   for (const checkpoint of project.production.checkpoints) statements.push(productionRecord('continuity-checkpoint', checkpoint.id, 'Approved', checkpoint.sequenceNumber, checkpoint));
   for (const capability of project.production.modelCapabilities) statements.push(productionRecord('model-capability', capability.id, capability.connectionStatus, null, capability));
+  for (const dependency of project.production.control.sequenceDependencies) statements.push(productionRecord('explicit-sequence-dependency', dependency.id, dependency.status, dependency.sequenceNumber, dependency));
+  for (const finding of project.production.control.referenceBindingFindings) statements.push(productionRecord('reference-binding-audit', finding.id, finding.severity, finding.sequenceNumber, finding));
+  for (const timing of Object.values(project.production.control.dialogueTimingAudits)) statements.push(productionRecord('dialogue-timing-audit', `sequence-${timing.sequenceNumber}`, timing.fits ? 'Passed' : 'Failed', timing.sequenceNumber, timing));
+  for (const translation of Object.values(project.production.control.providerTranslations)) statements.push(productionRecord('provider-translation', `sequence-${translation.sequenceNumber}`, translation.status, translation.sequenceNumber, translation));
+  for (const freeze of project.production.control.freezeSnapshots) statements.push(productionRecord('production-freeze', freeze.id, 'Immutable', null, freeze));
+  for (const provenance of project.production.control.resultProvenance) statements.push(productionRecord('result-provenance', provenance.id, 'Recorded', provenance.sequenceNumber, provenance));
+  statements.push(productionRecord('project-integrity-audit', project.production.control.integrityAudit.id, project.production.control.integrityAudit.status, null, project.production.control.integrityAudit));
+  for (const reservation of project.production.control.reservedNumbers) {
+    statements.push(DB.prepare(`INSERT INTO reserved_numbers (id, project_id, kind, number, stable_id, status, reserved_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(project_id, kind, number) DO UPDATE SET status = excluded.status`)
+      .bind(`${project.id}:${reservation.kind}:${reservation.number}`, project.id, reservation.kind, reservation.number, reservation.stableId, reservation.status, reservation.reservedAt));
+  }
+  for (const source of project.production.control.finalSourceMap) {
+    const provenance = project.production.control.resultProvenance.find((item) => item.id === source.provenanceId);
+    statements.push(DB.prepare(`INSERT INTO final_sequence_sources (id, project_id, sequence_number, result_media_key, provenance_json, approved_at)
+      VALUES (?, ?, ?, ?, ?, ?)
+      ON CONFLICT(project_id, sequence_number) DO UPDATE SET result_media_key = excluded.result_media_key,
+      provenance_json = excluded.provenance_json, approved_at = excluded.approved_at`)
+      .bind(`${project.id}:source:${source.sequenceNumber}`, project.id, source.sequenceNumber, source.resultMediaKey, JSON.stringify(provenance ?? source), source.approvedAt));
+  }
+  for (const capability of project.production.modelCapabilities) {
+    statements.push(DB.prepare(`INSERT OR IGNORE INTO provider_capability_versions
+      (id, project_id, profile_id, revision, capability_json, refreshed_at) VALUES (?, ?, ?, ?, ?, ?)`)
+      .bind(`${project.id}:${capability.id}:${capability.capabilityRevision}`, project.id, capability.id, capability.capabilityRevision, JSON.stringify(capability), capability.refreshedAt));
+  }
   statements.push(
     productionRecord('cost-ledger', 'current', 'Tracked', null, project.production.costLedger),
     productionRecord('final-assembly', project.production.finalAssembly.id, project.production.finalAssembly.status, null, project.production.finalAssembly),
@@ -192,17 +228,48 @@ function intelligenceStatements(project: StudioProject) {
   return statements;
 }
 
-async function saveRecoverySnapshot(project: StudioProject, reason: string) {
+async function resolveRollback(project: StudioProject, content: string) {
   const { DB } = getRuntimeEnv();
-  await DB.prepare('INSERT INTO project_recovery_snapshots (id, project_id, reason, state_json, created_at) VALUES (?, ?, ?, ?, ?)')
-    .bind(crypto.randomUUID(), project.id, reason, JSON.stringify(project), nowIso())
-    .run();
-  project.production.autosave.recoverySnapshotCount += 1;
-  project.production.autosave.lastRecoveryReason = reason;
+  if (/undo (?:the )?last change/i.test(content)) {
+    const row = await DB.prepare('SELECT state_json, reason FROM project_recovery_snapshots WHERE project_id = ? ORDER BY created_at DESC LIMIT 1')
+      .bind(project.id).first<{ state_json: string; reason: string }>();
+    if (!row) return null;
+    const restored = normalizeProject(JSON.parse(row.state_json) as StudioProject);
+    restored.storageRevision = project.storageRevision;
+    restored.updatedAt = nowIso();
+    return { project: restored, text: `Undid the last persisted project change using the recovery snapshot “${row.reason}”. Permanent asset and sequence numbers remain reserved.` };
+  }
+  const sequenceVersion = content.match(/(?:go back to|restore)\s+sequence\s*0*(\d+)\s+(?:version|v)\s*0*(\d+)/i);
+  if (sequenceVersion) {
+    const number = Number(sequenceVersion[1]);
+    const version = Number(sequenceVersion[2]);
+    const row = await DB.prepare(`SELECT sv.content_json FROM sequence_versions sv
+      JOIN sequences s ON s.id = sv.sequence_id WHERE s.project_id = ? AND s.sequence_number = ? AND sv.version = ? LIMIT 1`)
+      .bind(project.id, number, version).first<{ content_json: string }>();
+    if (!row) return { project, text: `Sequence ${number} version ${version} was not found; nothing changed.` };
+    const restoredSequence = JSON.parse(row.content_json) as StudioProject['sequences'][number];
+    project.sequences = project.sequences.map((sequence) => sequence.number === number ? restoredSequence : sequence);
+    project.updatedAt = nowIso();
+    return { project: normalizeProject(project), text: `Restored Sequence ${number} to version ${version}. Other sequences, permanent numbers, assets, and approved media remain unchanged; downstream dependencies were recalculated.` };
+  }
+  if (/restore (?:the )?previous costume/i.test(content)) {
+    const rows = await DB.prepare('SELECT state_json FROM project_recovery_snapshots WHERE project_id = ? ORDER BY created_at DESC LIMIT 25')
+      .bind(project.id).all<{ state_json: string }>();
+    const current = JSON.stringify(project.assets.filter((asset) => asset.category === 'Costumes'));
+    const prior = rows.results.map((row) => JSON.parse(row.state_json) as StudioProject).find((snapshot) => JSON.stringify(snapshot.assets.filter((asset) => asset.category === 'Costumes')) !== current);
+    if (!prior) return { project, text: 'No earlier costume state was found; nothing changed.' };
+    const priorCostumes = new Map(prior.assets.filter((asset) => asset.category === 'Costumes').map((asset) => [asset.id, asset]));
+    project.assets = project.assets.map((asset) => priorCostumes.get(asset.id) ?? asset);
+    project.updatedAt = nowIso();
+    return { project: normalizeProject(project), text: 'Restored the previous costume state only. Permanent numbers and unrelated story, assets, sequences, and media remain unchanged; impacted dependencies were recalculated.' };
+  }
+  return null;
 }
 
 async function createProjectGraph(project: StudioProject, messages: StudioMessage[]) {
   const { DB } = getRuntimeEnv();
+  project.storageRevision = 1;
+  const transactionId = crypto.randomUUID();
   const statements: D1PreparedStatement[] = [
     DB.prepare(`INSERT INTO projects (
       id, title, duration_seconds, sequence_duration_seconds, sequence_count, genre,
@@ -213,6 +280,8 @@ async function createProjectGraph(project: StudioProject, messages: StudioMessag
       project.genre, project.story.status, project.filmBible.status, 'Planned', 'Planned', project.continuity.status,
       project.exportStatus, project.pinned ? 1 : 0, project.archived ? 1 : 0, JSON.stringify(project), project.createdAt, project.updatedAt,
     ),
+    DB.prepare('INSERT INTO project_transactions (project_id, revision, last_transaction_id, updated_at) VALUES (?, ?, ?, ?)')
+      .bind(project.id, project.storageRevision, transactionId, project.updatedAt),
     DB.prepare('INSERT INTO story_versions (id, project_id, version, content_json, approval_status, created_at) VALUES (?, ?, ?, ?, ?, ?)')
       .bind(crypto.randomUUID(), project.id, project.story.version, JSON.stringify(project.story), project.story.status, project.createdAt),
     DB.prepare('INSERT INTO film_bible_versions (id, project_id, version, content_json, approval_status, created_at) VALUES (?, ?, ?, ?, ?, ?)')
@@ -260,9 +329,23 @@ async function createProjectGraph(project: StudioProject, messages: StudioMessag
   await runBatches(statements);
 }
 
-async function persistProject(project: StudioProject, messages: StudioMessage[]) {
+async function persistProject(project: StudioProject, messages: StudioMessage[], expectedRevision: number, scope: string, summary: string, beforeProject: StudioProject) {
   const { DB } = getRuntimeEnv();
+  const transactionId = crypto.randomUUID();
+  const snapshotId = crypto.randomUUID();
+  const nextRevision = expectedRevision + 1;
+  project.storageRevision = nextRevision;
+  project.production.autosave.recoverySnapshotCount += 1;
+  project.production.autosave.lastRecoveryReason = summary;
+  const change = { id: `change_${crypto.randomUUID()}`, revision: nextRevision, scope, summary, createdAt: project.updatedAt };
+  project.production.control.changeLog.push(change);
+  const afterStateHash = `${JSON.stringify(project).length.toString(16)}-${project.updatedAt}`;
   const statements: D1PreparedStatement[] = [
+    DB.prepare(`INSERT INTO transaction_guards (id, project_id, revision_ok, created_at)
+      SELECT ?, ?, CASE WHEN revision = ? THEN 1 ELSE 0 END, ? FROM project_transactions WHERE project_id = ?`)
+      .bind(transactionId, project.id, expectedRevision, project.updatedAt, project.id),
+    DB.prepare('INSERT INTO project_recovery_snapshots (id, project_id, reason, state_json, created_at) VALUES (?, ?, ?, ?, ?)')
+      .bind(snapshotId, project.id, summary, JSON.stringify(beforeProject), project.updatedAt),
     DB.prepare(`UPDATE projects SET
       title = ?, duration_seconds = ?, sequence_duration_seconds = ?, sequence_count = ?, genre = ?,
       story_status = ?, film_bible_status = ?, asset_status = ?, sequence_status = ?, continuity_status = ?,
@@ -274,6 +357,12 @@ async function persistProject(project: StudioProject, messages: StudioMessage[])
       project.continuity.status, project.exportStatus, project.pinned ? 1 : 0, project.archived ? 1 : 0,
       JSON.stringify(project), project.updatedAt, project.id,
     ),
+    DB.prepare('UPDATE project_transactions SET revision = ?, last_transaction_id = ?, updated_at = ? WHERE project_id = ?')
+      .bind(nextRevision, transactionId, project.updatedAt, project.id),
+    DB.prepare(`INSERT INTO production_change_log
+      (id, project_id, revision, scope, summary, before_snapshot_id, after_state_hash, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
+      .bind(change.id, project.id, change.revision, change.scope, change.summary, snapshotId, afterStateHash, change.createdAt),
     DB.prepare('INSERT OR IGNORE INTO story_versions (id, project_id, version, content_json, approval_status, created_at) VALUES (?, ?, ?, ?, ?, ?)')
       .bind(crypto.randomUUID(), project.id, project.story.version, JSON.stringify(project.story), project.story.status, project.updatedAt),
     DB.prepare('INSERT OR IGNORE INTO film_bible_versions (id, project_id, version, content_json, approval_status, created_at) VALUES (?, ?, ?, ?, ?, ?)')
@@ -369,6 +458,7 @@ export async function POST(request: Request) {
       message?: string;
       action?: 'pin' | 'archive' | 'settings';
       settings?: Partial<StudioProject['settings']>;
+      expectedRevision?: number;
     };
 
     if (!body.projectId) {
@@ -383,27 +473,37 @@ export async function POST(request: Request) {
 
     const project = await loadProject(body.projectId);
     if (!project) return json({ error: 'That project is no longer available.' }, { status: 404 });
+    const expectedRevision = body.expectedRevision ?? project.storageRevision;
+    if (expectedRevision !== project.storageRevision) {
+      return json({ error: `This project changed in another session. Reloaded revision is ${project.storageRevision}; your request expected revision ${expectedRevision}. No changes were applied.`, conflict: true, project }, { status: 409 });
+    }
 
     if (body.action === 'pin' || body.action === 'archive' || body.action === 'settings') {
-      await saveRecoverySnapshot(project, `Before ${body.action} action`);
+      const beforeProject = structuredClone(project);
       if (body.action === 'pin') project.pinned = !project.pinned;
       if (body.action === 'archive') project.archived = true;
       if (body.action === 'settings' && body.settings) project.settings = { ...project.settings, ...body.settings };
       project.updatedAt = nowIso();
-      await persistProject(project, []);
+      await persistProject(project, [], expectedRevision, body.action, `${body.action} project setting`, beforeProject);
       return json({ project, projects: await listProjects() });
     }
 
     const content = body.message?.trim();
     if (!content) return json({ error: 'Write an instruction for the studio.' }, { status: 400 });
-    await saveRecoverySnapshot(project, `Before chat instruction: ${content.slice(0, 160)}`);
+    const beforeProject = structuredClone(project);
     const userMessage: StudioMessage = { id: `message_${crypto.randomUUID()}`, role: 'user', content, createdAt: nowIso() };
-    const result = interpretStudioMessage(project, content);
+    const rollback = await resolveRollback(project, content);
+    const result = rollback
+      ? { project: rollback.project, response: { id: `message_${crypto.randomUUID()}`, role: 'assistant' as const, content: rollback.text, createdAt: nowIso(), metadata: { kind: 'control' as const } } }
+      : interpretStudioMessage(project, content);
     const normalized = normalizeProject(result.project);
-    await persistProject(normalized, [userMessage, result.response]);
-    return json({ project: normalized, messages: [userMessage, result.response], projects: await listProjects(), sideEffect: result.sideEffect });
+    await persistProject(normalized, [userMessage, result.response], expectedRevision, rollback ? 'rollback' : 'chat', content.slice(0, 240), beforeProject);
+    return json({ project: normalized, messages: [userMessage, result.response], projects: await listProjects(), sideEffect: 'sideEffect' in result ? result.sideEffect : undefined });
   } catch (error) {
     console.error(error);
+    if (error instanceof Error && /CHECK constraint failed|transaction_revision_must_match/i.test(error.message)) {
+      return json({ error: 'This project changed while the operation was being saved. Nothing was partially written; reload and retry.', conflict: true }, { status: 409 });
+    }
     return json({ error: 'I could not apply that change. Your existing project is unchanged.' }, { status: 500 });
   }
 }

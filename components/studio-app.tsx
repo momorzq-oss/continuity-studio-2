@@ -300,6 +300,9 @@ function AssetsCard({ project, ids, onAction, onOpenLibrary }: { project: Studio
 function SequenceCard({ project, sequence, onAction }: { project: StudioProject; sequence: StudioSequence; onAction: (message: string) => void }) {
   const copyPrompt = async () => navigator.clipboard.writeText(sequence.prompt);
   const plan = project.production.sequencePlans[sequence.id];
+  const job = project.production.renderQueue.findLast((item) => item.sequenceNumber === sequence.number);
+  const timingAudit = project.production.control.dialogueTimingAudits[sequence.id];
+  const bindingFindings = project.production.control.referenceBindingFindings.filter((item) => item.sequenceNumber === sequence.number);
   return (
     <section className="mt-4 overflow-hidden rounded-2xl border border-border bg-card/65">
       <div className="flex items-start justify-between gap-4 border-b border-border/70 p-4">
@@ -320,6 +323,11 @@ function SequenceCard({ project, sequence, onAction }: { project: StudioProject;
           <StateBlock label="Scene state" value={`${sequence.sceneState.locationId} · ${sequence.sceneState.environmentId}`} />
           <StateBlock label="Scene graph" value={`${sequence.sceneGraph.nodes.length} nodes · ${sequence.sceneGraph.edges.length} relationships`} />
           <StateBlock label="Look-ahead" value={`${sequence.lookAhead.length} future requirement${sequence.lookAhead.length === 1 ? '' : 's'}`} />
+        </div>
+        {job && ['Awaiting Confirmation', 'Paused', 'Failed', 'Waiting', 'External'].includes(job.status) && <div className="rounded-xl border border-amber-300/20 bg-amber-300/5 p-3"><div className="flex flex-wrap items-center justify-between gap-2"><div><p className="text-xs font-medium">Generation control · {job.status}</p><p className="mt-1 text-[10px] leading-5 text-muted-foreground">Sequence {job.sequenceNumber} · {job.provider} · {job.model} · {job.durationSeconds}s · {job.resolution} · next confirmed attempt 1 credit</p></div><Badge variant="outline" className={statusClass(job.status)}>{job.generationCount} paid attempts</Badge></div><p className="mt-2 text-[10px] leading-5 text-muted-foreground">{job.failureMessage}</p><div className="mt-3 flex flex-wrap gap-2">{job.status === 'Awaiting Confirmation' && <Button size="xs" onClick={() => onAction(`Confirm generation Sequence ${sequence.number}`)}><Play />Confirm paid attempt</Button>}{['Paused', 'Failed', 'Cancelled'].includes(job.status) && <Button size="xs" onClick={() => onAction(`Resume generation Sequence ${sequence.number}`)}>Resume</Button>}{!['Completed', 'Approved', 'Cancelled', 'External'].includes(job.status) && <Button size="xs" variant="outline" onClick={() => onAction(`Cancel generation Sequence ${sequence.number}`)}><X />Cancel</Button>}</div></div>}
+        <div className="grid gap-3 text-xs sm:grid-cols-2">
+          <StateBlock label="Dialogue timing audit" value={timingAudit?.message ?? 'Not evaluated'} />
+          <StateBlock label="Reference binding audit" value={bindingFindings.length ? `${bindingFindings.length} finding${bindingFindings.length === 1 ? '' : 's'}` : 'Passed'} />
         </div>
         <div>
           <div className="flex items-center justify-between gap-3"><p className="text-[10px] font-semibold uppercase tracking-[0.14em] text-muted-foreground">Internal timing</p><p className="text-[10px] tabular-nums text-muted-foreground">0–{sequence.duration}s · {plan.timing.length} beats</p></div>
@@ -427,17 +435,19 @@ function ProductionReadinessCard({ project, onAction }: { project: StudioProject
   return (
     <section className="mt-4 rounded-2xl border border-border bg-card/65 p-4">
       <div className="flex items-start justify-between gap-4"><div><p className="text-sm font-medium">Production control</p><p className="mt-1 text-xs text-muted-foreground">{project.production.currentPipelineStage} · autosaved {relativeTime(project.production.autosave.lastSavedAt)}</p></div><Badge variant="outline" className={statusClass(project.production.readiness)}>{project.production.readiness}</Badge></div>
-      <div className="mt-4 grid gap-3 text-xs sm:grid-cols-3 lg:grid-cols-6">
+      <div className="mt-4 grid gap-3 text-xs sm:grid-cols-3 lg:grid-cols-8">
         <StateBlock label="Dependencies" value={impacts.length ? `${impacts.length} affected` : 'All current'} />
         <StateBlock label="Render queue" value={`${project.production.renderQueue.length} jobs`} />
         <StateBlock label="Attempts" value={`${ledger.generationCount} · ${ledger.estimatedCredits} credits`} />
         <StateBlock label="Checkpoints" value={`${project.production.checkpoints.length} saved`} />
         <StateBlock label="Repetition" value={project.production.repetitionFindings.length ? `${project.production.repetitionFindings.length} review` : 'Clear'} />
         <StateBlock label="Movie audit" value={project.production.completionAudit.status} />
+        <StateBlock label="Integrity" value={project.production.control.integrityAudit.status} />
+        <StateBlock label="Production freeze" value={project.production.control.freezeSnapshots.length ? `${project.production.control.freezeSnapshots.length} immutable` : 'Not frozen'} />
       </div>
       <div className="mt-3 rounded-xl bg-background/55 p-3 text-xs leading-5 text-foreground/80"><span className="font-medium">Next logical action:</span> {project.production.nextLogicalAction}</div>
       {impacts.length > 0 && <div className="mt-3 flex flex-wrap gap-1.5">{impacts.slice(0, 6).map((impact) => <Badge key={impact.id} variant="outline" className={statusClass(impact.freshness)}>{impact.targetId} · {impact.freshness}</Badge>)}</div>}
-      <div className="mt-4 flex flex-wrap gap-2 border-t border-border/70 pt-3"><Button size="sm" onClick={() => onAction('Continue')}>Continue production</Button><Button size="sm" variant="outline" onClick={() => onAction('Show dependencies')}>Dependencies</Button><Button size="sm" variant="outline" onClick={() => onAction('Show render queue and costs')}>Queue & cost</Button><Button size="sm" variant="ghost" onClick={() => onAction('Run final quality check')}>Final check</Button></div>
+      <div className="mt-4 flex flex-wrap gap-2 border-t border-border/70 pt-3"><Button size="sm" onClick={() => onAction('Continue')}>Continue production</Button><Button size="sm" variant="outline" onClick={() => onAction('What is missing?')}>Self-check</Button><Button size="sm" variant="outline" onClick={() => onAction('Show dependencies')}>Dependencies</Button><Button size="sm" variant="outline" onClick={() => onAction('Show render queue and costs')}>Queue & cost</Button><Button size="sm" variant="outline" onClick={() => onAction('Show change log')}>Change log</Button><Button size="sm" variant="ghost" onClick={() => onAction('Run final quality check')}>Final check</Button></div>
     </section>
   );
 }
@@ -471,11 +481,11 @@ function MessageItem({ item, project, onAction, onOpenLibrary, onExport, onAsset
           {['scene', 'graph', 'lookahead'].includes(item.metadata?.kind ?? '') && sequence && <SceneIntelligenceCard sequence={sequence} />}
           {item.metadata?.kind === 'dialogue' && sequence && <DialogueCard project={project} sequence={sequence} />}
           {item.metadata?.kind === 'validation' && sequence && <ValidationCard project={project} sequence={sequence} onAction={onAction} />}
-          {['readiness', 'queue', 'assembly', 'status'].includes(item.metadata?.kind ?? '') && <ProductionReadinessCard project={project} onAction={onAction} />}
+          {['readiness', 'queue', 'assembly', 'status', 'control', 'integrity', 'import'].includes(item.metadata?.kind ?? '') && <ProductionReadinessCard project={project} onAction={onAction} />}
           {item.metadata?.kind === 'coverage' && <ReferenceCoverageCard assets={item.metadata.assetIds?.length ? project.assets.filter((asset) => item.metadata?.assetIds?.includes(asset.id)) : project.assets.filter((asset) => asset.importance !== 'Incidental')} />}
           {item.metadata?.kind === 'export' && <ExportCard project={project} onExport={onExport} />}
           {item.metadata?.kind === 'flat-assets' && <FlatAssetExportCard project={project} onAssetExport={onAssetExport} />}
-          {item.metadata?.kind === 'attachment' && <div className="mt-3 flex items-center gap-3 rounded-xl border border-border bg-card/55 p-3"><FileImage className="size-4 text-amber-200" /><span className="text-xs text-muted-foreground">Original reference stored in project memory</span></div>}
+          {item.metadata?.kind === 'attachment' && (() => { const attachment = project.attachments.find((entry) => entry.id === item.metadata?.attachmentId); const preview = attachment && `/api/files?projectId=${encodeURIComponent(project.id)}&referenceId=${encodeURIComponent(attachment.id)}`; return <div className="mt-3 overflow-hidden rounded-xl border border-border bg-card/55 p-3">{attachment?.contentType.startsWith('image/') && preview ? <object data={preview} type={attachment.contentType} aria-label={attachment.name} className="mb-3 h-64 w-full rounded-lg bg-background object-contain" /> : attachment?.contentType.startsWith('video/') && preview ? <video src={preview} controls className="mb-3 max-h-64 w-full rounded-lg bg-black"><track kind="captions" src="data:text/vtt,WEBVTT%0A%0A" srcLang="en" label="Captions unavailable" default /></video> : null}<div className="flex items-center gap-3"><FileImage className="size-4 text-amber-200" /><span className="text-xs text-muted-foreground">{attachment ? `${attachment.name} · ${attachment.integrityStatus ?? 'Original'} · preview uses the untouched original` : 'Original reference stored in project memory'}</span></div></div>; })()}
         </div>
       </div>
     </div>
@@ -498,6 +508,7 @@ export function StudioApp() {
   const [lightMode, setLightMode] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const importInputRef = useRef<HTMLInputElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
@@ -511,14 +522,28 @@ export function StudioApp() {
     setTimeout(() => textareaRef.current?.focus(), 50);
   }, []);
 
-  const downloadExport = useCallback((projectId = project?.id) => {
+  const downloadExport = useCallback(async (projectId = project?.id) => {
     if (!projectId) return;
-    const anchor = document.createElement('a');
-    anchor.href = `/api/export?projectId=${encodeURIComponent(projectId)}`;
-    anchor.download = '';
-    document.body.appendChild(anchor);
-    anchor.click();
-    anchor.remove();
+    setError('');
+    try {
+      const response = await fetch(`/api/export?projectId=${encodeURIComponent(projectId)}`);
+      if (!response.ok) { const data = await response.json() as { error?: string }; throw new Error(data.error || 'The project export could not be created.'); }
+      const disposition = response.headers.get('Content-Disposition') ?? '';
+      const filename = disposition.match(/filename="([^"]+)"/)?.[1] ?? 'CONTINUITY_STUDIO_PROJECT.zip';
+      const blobUrl = URL.createObjectURL(await response.blob());
+      const anchor = document.createElement('a');
+      anchor.href = blobUrl;
+      anchor.download = filename;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      URL.revokeObjectURL(blobUrl);
+      const refreshed = await fetch(`/api/studio?projectId=${encodeURIComponent(projectId)}`, { cache: 'no-store' });
+      const data = await refreshed.json() as { project?: StudioProject; messages?: StudioMessage[]; projects?: ProjectSummary[] };
+      if (data.project) { setProject(data.project); setMessages(data.messages ?? []); setProjects(data.projects ?? []); }
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'The project export could not be created.');
+    }
   }, [project?.id]);
 
   const downloadAssets = useCallback(async (projectId = project?.id) => {
@@ -607,7 +632,8 @@ export function StudioApp() {
     const uploadedMessages: StudioMessage[] = [];
     for (const file of selectedFiles) {
       const form = new FormData();
-      form.append('projectId', activeProject.id);
+      form.append('projectId', nextProject.id);
+      form.append('expectedRevision', String(nextProject.storageRevision));
       form.append('file', file);
       form.append('role', role);
       const response = await fetch('/api/files', { method: 'POST', body: form });
@@ -620,6 +646,29 @@ export function StudioApp() {
     setMessages((current) => [...current, ...uploadedMessages]);
   }, []);
 
+  const importProject = useCallback(async (file: File) => {
+    setWorking(true);
+    setError('');
+    try {
+      const form = new FormData();
+      form.append('file', file);
+      const response = await fetch('/api/import', { method: 'POST', body: form });
+      const data = await response.json() as { project?: StudioProject; messages?: StudioMessage[]; error?: string };
+      if (!response.ok || !data.project) throw new Error(data.error || 'The project could not be imported.');
+      setProject(data.project);
+      setMessages(data.messages ?? []);
+      const listResponse = await fetch('/api/studio', { cache: 'no-store' });
+      const listData = await listResponse.json() as { projects?: ProjectSummary[] };
+      setProjects(listData.projects ?? []);
+      setView('chat');
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'The project could not be imported.');
+    } finally {
+      setWorking(false);
+      if (importInputRef.current) importInputRef.current.value = '';
+    }
+  }, []);
+
   const submitInstruction = useCallback(async (instruction: string, selectedFiles: File[] = []) => {
     const content = instruction.trim();
     if ((!content && selectedFiles.length === 0) || working) return;
@@ -630,7 +679,7 @@ export function StudioApp() {
       const response = await fetch('/api/studio', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ projectId: project?.id, message: content || fallbackContent }),
+        body: JSON.stringify({ projectId: project?.id, expectedRevision: project?.storageRevision, message: content || fallbackContent }),
       });
       const data = await response.json() as { project?: StudioProject; messages?: StudioMessage[]; projects?: ProjectSummary[]; error?: string; sideEffect?: string };
       if (!response.ok || !data.project) throw new Error(data.error || 'The instruction could not be applied.');
@@ -671,7 +720,7 @@ export function StudioApp() {
 
   const updateProject = async (body: Record<string, unknown>) => {
     if (!project) return;
-    const response = await fetch('/api/studio', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ projectId: project.id, ...body }) });
+    const response = await fetch('/api/studio', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ projectId: project.id, expectedRevision: project.storageRevision, ...body }) });
     const data = await response.json() as { project?: StudioProject; projects?: ProjectSummary[]; error?: string };
     if (!response.ok || !data.project) throw new Error(data.error || 'The project could not be updated.');
     setProject(data.project);
@@ -699,6 +748,8 @@ export function StudioApp() {
           <Button variant="ghost" size="icon-sm" className="md:hidden" onClick={() => setMobileNav(false)} aria-label="Close navigation"><X /></Button>
         </div>
         <Button className="h-10 w-full justify-start gap-2.5 rounded-xl bg-primary px-3 shadow-[0_8px_24px_-12px_var(--primary)]" onClick={startNewMovie}><Plus />New Movie</Button>
+        <input ref={importInputRef} type="file" className="sr-only" accept=".zip,.json,.txt,.md,.fountain,.fdx" onChange={(event) => { const selected = event.target.files?.[0]; if (selected) void importProject(selected); }} />
+        <Button className="mt-2 h-9 w-full justify-start gap-2.5 rounded-xl px-3" variant="outline" onClick={() => importInputRef.current?.click()}><Upload />Import Project</Button>
         <nav className="mt-4 space-y-1" aria-label="Workspace">
           {primaryNavigation.map(({ id, label, icon: Icon }) => (
             <Button key={id} variant="ghost" onClick={() => setCurrentView(id)} className={cn('h-9 w-full justify-start gap-3 rounded-lg px-3 text-muted-foreground hover:text-foreground', view === id && 'bg-sidebar-accent text-sidebar-accent-foreground')}>
@@ -733,7 +784,7 @@ export function StudioApp() {
         {booting ? <LoadingSurface /> : view === 'chat' ? (
           <ChatView project={project} messages={messages} working={working} error={error} onAction={onAction} onOpenLibrary={() => setView('assets')} onExport={() => downloadExport()} onAssetExport={() => void downloadAssets()} endRef={messagesEndRef} />
         ) : view === 'projects' ? (
-          <ProjectsView projects={filteredProjects} search={search} setSearch={setSearch} searchRef={searchRef} onOpen={loadProject} onNew={startNewMovie} />
+          <ProjectsView projects={filteredProjects} search={search} setSearch={setSearch} searchRef={searchRef} onOpen={loadProject} onNew={startNewMovie} onImport={() => importInputRef.current?.click()} />
         ) : view === 'assets' ? (
           <AssetsView project={project} assets={filteredAssets} filter={assetFilter} setFilter={setAssetFilter} onAction={onAction} onAssetExport={() => void downloadAssets()} onNew={startNewMovie} />
         ) : view === 'exports' ? (
@@ -797,8 +848,8 @@ function PageFrame({ eyebrow, title, description, children, action }: { eyebrow:
   return <div className="min-h-0 flex-1 overflow-y-auto"><div className="mx-auto w-full max-w-6xl px-5 py-8 sm:px-8 sm:py-12"><div className="flex flex-col justify-between gap-5 sm:flex-row sm:items-end"><div><p className="eyebrow">{eyebrow}</p><h1 className="mt-2 text-3xl font-medium tracking-[-0.045em] sm:text-4xl">{title}</h1><p className="mt-3 max-w-2xl text-sm leading-6 text-muted-foreground">{description}</p></div>{action}</div><div className="mt-8">{children}</div></div></div>;
 }
 
-function ProjectsView({ projects, search, setSearch, searchRef, onOpen, onNew }: { projects: ProjectSummary[]; search: string; setSearch: (value: string) => void; searchRef: React.RefObject<HTMLInputElement | null>; onOpen: (id: string) => Promise<void>; onNew: () => void }) {
-  return <PageFrame eyebrow="Project memory" title="Your movies" description="Every conversation, approval, version, reference, and continuity decision returns with the project." action={<Button onClick={onNew}><Plus />New Movie</Button>}>
+function ProjectsView({ projects, search, setSearch, searchRef, onOpen, onNew, onImport }: { projects: ProjectSummary[]; search: string; setSearch: (value: string) => void; searchRef: React.RefObject<HTMLInputElement | null>; onOpen: (id: string) => Promise<void>; onNew: () => void; onImport: () => void }) {
+  return <PageFrame eyebrow="Project memory" title="Your movies" description="Every conversation, approval, version, reference, and continuity decision returns with the project." action={<div className="flex gap-2"><Button variant="outline" onClick={onImport}><Upload />Import</Button><Button onClick={onNew}><Plus />New Movie</Button></div>}>
     <div className="relative max-w-md"><Search className="absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" /><Input ref={searchRef} value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search projects, characters, locations…" className="h-10 rounded-xl pl-9" /></div>
     {projects.length === 0 ? <EmptyCollection icon={FolderClock} title={search ? 'No matching movies' : 'No movies yet'} text={search ? 'Try another project name.' : 'Start with one sentence in chat. Your first real project will appear here.'} action={!search ? <Button onClick={onNew}><Plus />Create a movie</Button> : undefined} /> : <div className="mt-6 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">{projects.map((item) => <button key={item.id} type="button" onClick={() => void onOpen(item.id)} className="group rounded-2xl border border-border bg-card/55 p-4 text-left transition hover:-translate-y-0.5 hover:border-amber-300/25 hover:bg-card"><div className="flex items-start justify-between gap-3"><span className="grid size-10 place-items-center rounded-xl border border-amber-300/15 bg-amber-300/8 text-amber-200"><Clapperboard className="size-5" /></span><div className="flex items-center gap-1 text-[10px] text-muted-foreground">{item.pinned && <Pin className="size-3 text-amber-300" />}{relativeTime(item.updatedAt)}</div></div><h2 className="mt-5 truncate text-sm font-medium">{item.title}</h2><p className="mt-1 text-xs text-muted-foreground">{durationLabel(item.durationSeconds)} · {item.sequenceCount} sequences · {item.stage}</p><div className="mt-5 flex items-center gap-3"><Progress value={item.progress} className="flex-1" /><span className="text-[10px] tabular-nums text-muted-foreground">{item.progress}%</span></div></button>)}</div>}
   </PageFrame>;

@@ -3,6 +3,10 @@ import { assetProductionReference, normalizeProject, nowIso, type StudioMessage,
 
 export const runtime = 'edge';
 
+function toHex(bytes: ArrayBuffer) {
+  return [...new Uint8Array(bytes)].map((value) => value.toString(16).padStart(2, '0')).join('');
+}
+
 function cleanName(name: string) {
   return name.replace(/[^a-zA-Z0-9._-]+/g, '-').replace(/-+/g, '-').slice(0, 120) || 'reference';
 }
@@ -44,21 +48,42 @@ export async function POST(request: Request) {
     if (file.type.startsWith('audio/')) {
       return Response.json({ error: 'Continuity Studio does not store separate sound assets. Write dialogue, ambience, effects, music, or silence as scenario instructions; Seedance generates them inside the video.' }, { status: 415 });
     }
-    if (file.size > 250 * 1024 * 1024) {
-      return Response.json({ error: 'That file is over the 250 MB reference limit.' }, { status: 413 });
+    if (file.size > 95 * 1024 * 1024) {
+      return Response.json({ error: 'That file is over the 95 MB reference limit.' }, { status: 413 });
     }
     const { DB, FILES } = getRuntimeEnv();
-    const row = await DB.prepare('SELECT state_json FROM projects WHERE id = ? AND archived = 0')
+    const row = await DB.prepare(`SELECT p.state_json, COALESCE(t.revision, 0) AS revision
+      FROM projects p LEFT JOIN project_transactions t ON t.project_id = p.id
+      WHERE p.id = ? AND p.archived = 0`)
       .bind(projectId)
-      .first<{ state_json: string }>();
+      .first<{ state_json: string; revision: number }>();
     if (!row) return Response.json({ error: 'Open a project before adding references.' }, { status: 404 });
 
     const project = normalizeProject(JSON.parse(row.state_json) as StudioProject);
+    project.storageRevision = row.revision;
+    const expectedRevisionValue = form.get('expectedRevision');
+    const expectedRevision = typeof expectedRevisionValue === 'string' ? Number(expectedRevisionValue) : row.revision;
+    if (expectedRevision !== row.revision) return Response.json({ error: 'This project changed before the upload was saved. Reload and retry; no project state changed.', conflict: true, project }, { status: 409 });
+    const bytes = await file.arrayBuffer();
+    const fingerprintSha256 = toHex(await crypto.subtle.digest('SHA-256', bytes));
+    const duplicate = await DB.prepare(`SELECT fi.reference_id FROM file_integrity fi
+      WHERE fi.project_id = ? AND fi.fingerprint_sha256 = ? LIMIT 1`).bind(projectId, fingerprintSha256).first<{ reference_id: string }>();
+    if (duplicate) {
+      const attachment = project.attachments.find((item) => item.id === duplicate.reference_id);
+      const assistant: StudioMessage = {
+        id: `message_${crypto.randomUUID()}`, role: 'assistant', createdAt: nowIso(),
+        content: `“${file.name}” is byte-for-byte identical to the existing original “${attachment?.name ?? duplicate.reference_id}”. The existing reference was reused; no duplicate file or asset number was created.`,
+        metadata: { kind: 'attachment', assetIds: attachment?.linkedAssetId ? [attachment.linkedAssetId] : undefined, attachmentId: attachment?.id },
+      };
+      await DB.prepare('INSERT INTO chat_messages (id, project_id, role, content, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?)')
+        .bind(assistant.id, projectId, assistant.role, assistant.content, JSON.stringify(assistant.metadata), assistant.createdAt).run();
+      return Response.json({ project, attachment, message: assistant, duplicate: true });
+    }
     const id = `reference_${crypto.randomUUID()}`;
-    const mediaKey = `projects/${projectId}/reference_images/${id}-${cleanName(file.name)}`;
-    await FILES.put(mediaKey, file.stream(), {
+    const mediaKey = `projects/${projectId}/references/${id}-${cleanName(file.name)}`;
+    await FILES.put(mediaKey, bytes, {
       httpMetadata: { contentType: file.type || 'application/octet-stream' },
-      customMetadata: { projectId, originalName: file.name, role },
+      customMetadata: { projectId, originalName: file.name, role, fingerprintSha256 },
     });
 
     const createdAt = nowIso();
@@ -71,9 +96,13 @@ export async function POST(request: Request) {
       byteSize: file.size,
       createdAt,
       referenceRoles,
+      fingerprintSha256,
+      previewKind: file.type.startsWith('image/') ? 'image-adaptive' : file.type.startsWith('video/') ? 'video-native' : 'document',
+      integrityStatus: 'Verified',
     };
     project.attachments.push(attachment);
     project.updatedAt = createdAt;
+    project.storageRevision = row.revision + 1;
 
     let assetId: string | null = null;
     let coverageAsset: StudioProject['assets'][number] | null = null;
@@ -102,17 +131,39 @@ export async function POST(request: Request) {
       role: 'assistant',
       content: `Stored “${file.name}” as ${referenceRoles.join(', ')} reference${referenceRoles.length === 1 ? '' : 's'}. The original file is preserved${coverageAsset ? ` and contributes to the single ${assetProductionReference(coverageAsset)} identity profile` : ''}.`,
       createdAt,
-      metadata: { kind: 'attachment', assetIds: assetId ? ['CHARACTER_001'] : undefined },
+      metadata: { kind: 'attachment', assetIds: assetId ? ['CHARACTER_001'] : undefined, attachmentId: id },
     };
 
+    const transactionId = crypto.randomUUID();
+    const snapshotId = crypto.randomUUID();
+    const changeId = `change_${crypto.randomUUID()}`;
+    const summary = `Uploaded verified original ${file.name} (${fingerprintSha256.slice(0, 12)}).`;
+    project.production.control.changeLog.push({ id: changeId, revision: project.storageRevision, scope: 'file', summary, createdAt });
+    project.production.autosave.recoverySnapshotCount += 1;
+    project.production.autosave.lastRecoveryReason = summary;
     const statements = [
+      DB.prepare(`INSERT INTO transaction_guards (id, project_id, revision_ok, created_at)
+        SELECT ?, ?, CASE WHEN revision = ? THEN 1 ELSE 0 END, ? FROM project_transactions WHERE project_id = ?`)
+        .bind(transactionId, projectId, expectedRevision, createdAt, projectId),
+      DB.prepare('INSERT INTO project_recovery_snapshots (id, project_id, reason, state_json, created_at) VALUES (?, ?, ?, ?, ?)')
+        .bind(snapshotId, projectId, summary, row.state_json, createdAt),
       DB.prepare(`INSERT INTO asset_references (
         id, project_id, asset_id, original_name, media_key, content_type, byte_size, role, created_at
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`).bind(
         id, projectId, assetId, file.name, mediaKey, attachment.contentType, file.size, role, createdAt,
       ),
+      DB.prepare(`INSERT INTO file_integrity
+        (reference_id, project_id, fingerprint_sha256, preview_media_key, preview_kind, integrity_status, verified_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)`)
+        .bind(id, projectId, fingerprintSha256, mediaKey, attachment.previewKind, 'Original', createdAt),
       DB.prepare('UPDATE projects SET state_json = ?, updated_at = ? WHERE id = ?')
         .bind(JSON.stringify(project), createdAt, projectId),
+      DB.prepare('UPDATE project_transactions SET revision = ?, last_transaction_id = ?, updated_at = ? WHERE project_id = ?')
+        .bind(project.storageRevision, transactionId, createdAt, projectId),
+      DB.prepare(`INSERT INTO production_change_log
+        (id, project_id, revision, scope, summary, before_snapshot_id, after_state_hash, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
+        .bind(changeId, projectId, project.storageRevision, 'file', summary, snapshotId, `${JSON.stringify(project).length.toString(16)}-${createdAt}`, createdAt),
       DB.prepare('INSERT INTO chat_messages (id, project_id, role, content, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?)')
         .bind(assistant.id, projectId, assistant.role, assistant.content, JSON.stringify(assistant.metadata), assistant.createdAt),
     ];
@@ -131,6 +182,39 @@ export async function POST(request: Request) {
     return Response.json({ project, attachment, message: assistant });
   } catch (error) {
     console.error(error);
+    if (error instanceof Error && /CHECK constraint failed|transaction_revision_must_match/i.test(error.message)) {
+      return Response.json({ error: 'This project changed while the upload was being saved. The project transaction rolled back; reload and retry.', conflict: true }, { status: 409 });
+    }
     return Response.json({ error: 'The reference could not be stored. Your project is unchanged.' }, { status: 500 });
+  }
+}
+
+export async function GET(request: Request) {
+  try {
+    await ensureSchema();
+    const url = new URL(request.url);
+    const projectId = url.searchParams.get('projectId');
+    const referenceId = url.searchParams.get('referenceId');
+    if (!projectId || !referenceId) return Response.json({ error: 'Project and reference are required.' }, { status: 400 });
+    const { DB, FILES } = getRuntimeEnv();
+    const row = await DB.prepare('SELECT media_key, content_type, original_name FROM asset_references WHERE id = ? AND project_id = ?')
+      .bind(referenceId, projectId).first<{ media_key: string; content_type: string; original_name: string }>();
+    if (!row) return Response.json({ error: 'Reference not found.' }, { status: 404 });
+    const object = await FILES.get(row.media_key);
+    if (!object) {
+      await DB.prepare("UPDATE file_integrity SET integrity_status = 'Missing', verified_at = ? WHERE reference_id = ?").bind(nowIso(), referenceId).run();
+      return Response.json({ error: 'The original reference file is missing from project storage.' }, { status: 404 });
+    }
+    return new Response(object.body, {
+      headers: {
+        'Content-Type': object.httpMetadata?.contentType || row.content_type || 'application/octet-stream',
+        'Content-Disposition': `inline; filename="${cleanName(row.original_name)}"`,
+        'Cache-Control': 'private, max-age=300',
+        ETag: object.httpEtag,
+      },
+    });
+  } catch (error) {
+    console.error(error);
+    return Response.json({ error: 'The reference preview could not be loaded.' }, { status: 500 });
   }
 }

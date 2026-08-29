@@ -296,6 +296,89 @@ const schemaStatements = [
     created_at TEXT NOT NULL
   )`,
   `CREATE INDEX IF NOT EXISTS idx_project_recovery_project_created ON project_recovery_snapshots(project_id, created_at)`,
+  `CREATE TABLE IF NOT EXISTS project_transactions (
+    project_id TEXT PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,
+    revision INTEGER NOT NULL DEFAULT 0,
+    last_transaction_id TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  )`,
+  `INSERT OR IGNORE INTO project_transactions (project_id, revision, last_transaction_id, updated_at)
+    SELECT id, 0, 'schema-bootstrap', updated_at FROM projects`,
+  `CREATE TABLE IF NOT EXISTS transaction_guards (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    revision_ok INTEGER NOT NULL CHECK(revision_ok = 1),
+    created_at TEXT NOT NULL
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_transaction_guards_project ON transaction_guards(project_id)`,
+  `CREATE TABLE IF NOT EXISTS operation_locks (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    scope TEXT NOT NULL,
+    owner_token TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE(project_id, scope)
+  )`,
+  `CREATE TABLE IF NOT EXISTS production_change_log (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    revision INTEGER NOT NULL,
+    scope TEXT NOT NULL,
+    summary TEXT NOT NULL,
+    before_snapshot_id TEXT,
+    after_state_hash TEXT NOT NULL,
+    created_at TEXT NOT NULL
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_change_log_project_revision ON production_change_log(project_id, revision)`,
+  `CREATE TABLE IF NOT EXISTS file_integrity (
+    reference_id TEXT PRIMARY KEY REFERENCES asset_references(id) ON DELETE CASCADE,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    fingerprint_sha256 TEXT NOT NULL,
+    preview_media_key TEXT,
+    preview_kind TEXT NOT NULL DEFAULT 'none',
+    integrity_status TEXT NOT NULL DEFAULT 'Original',
+    verified_at TEXT NOT NULL,
+    UNIQUE(project_id, fingerprint_sha256)
+  )`,
+  `CREATE TABLE IF NOT EXISTS project_imports (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    import_kind TEXT NOT NULL,
+    source_name TEXT NOT NULL,
+    fingerprint_sha256 TEXT,
+    manifest_json TEXT NOT NULL,
+    created_at TEXT NOT NULL
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_project_imports_project_created ON project_imports(project_id, created_at)`,
+  `CREATE TABLE IF NOT EXISTS reserved_numbers (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    kind TEXT NOT NULL,
+    number INTEGER NOT NULL,
+    stable_id TEXT NOT NULL,
+    status TEXT NOT NULL,
+    reserved_at TEXT NOT NULL,
+    UNIQUE(project_id, kind, number)
+  )`,
+  `CREATE TABLE IF NOT EXISTS final_sequence_sources (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    sequence_number INTEGER NOT NULL,
+    result_media_key TEXT NOT NULL,
+    provenance_json TEXT NOT NULL,
+    approved_at TEXT NOT NULL,
+    UNIQUE(project_id, sequence_number)
+  )`,
+  `CREATE TABLE IF NOT EXISTS provider_capability_versions (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    profile_id TEXT NOT NULL,
+    revision TEXT NOT NULL,
+    capability_json TEXT NOT NULL,
+    refreshed_at TEXT NOT NULL,
+    UNIQUE(project_id, profile_id, revision)
+  )`,
   `PRAGMA optimize`,
 ] as const;
 

@@ -26,6 +26,9 @@ export interface DialogueLine {
   currentCostumeAssetNumbers: number[];
   language: string;
   dialect: string;
+  languageLock: string;
+  dialectLock: string;
+  pronunciations: Array<{ text: string; pronunciation: string; phonetic?: string }>;
   emotion: string;
   expression: string;
   physicalAction: string;
@@ -93,6 +96,7 @@ export interface SequenceScenario {
   location: string;
   timeOfDay: string;
   characterAssetIds: string[];
+  nonSpeakingCharacterAssetIds: string[];
   characterContinuity: Array<{
     assetId: string;
     assetNumber: number;
@@ -155,6 +159,8 @@ export interface CharacterProductionState {
   assetId: string;
   assetNumber: number;
   identityReference: string;
+  languageLock: string;
+  dialectLock: string;
   currentAppearance: {
     costumeAssetNumbers: number[];
     damage: string;
@@ -299,6 +305,9 @@ export function normalizeDialogueLines(project: StudioProject, sequence: StudioS
       turnType: raw.turnType ?? (index === 0 ? 'Line' : 'Response'), exactDialogue, speakerAssetId: speaker.id,
       speakerAssetNumber: speaker.projectNumber, speakerName: speaker.name, speakerVariant: raw.speakerVariant ?? 'Permanent identity with current scene state',
       currentCostumeAssetNumbers: costumes, language: raw.language ?? project.dialogueLanguage, dialect: raw.dialect ?? raw.accent ?? 'Character and region appropriate',
+      languageLock: raw.languageLock ?? raw.language ?? project.dialogueLanguage,
+      dialectLock: raw.dialectLock ?? raw.dialect ?? raw.accent ?? 'Character and region appropriate',
+      pronunciations: raw.pronunciations ?? [],
       emotion: raw.emotion ?? 'Story-appropriate controlled performance', expression: raw.expression ?? 'Readable, motivated expression',
       physicalAction: raw.physicalAction ?? 'Maintain authored blocking, eyeline, hand state, and object ownership while speaking.',
       addresseeAssetId: raw.addresseeAssetId ?? null, addresseeAssetNumber: raw.addresseeAssetNumber ?? null,
@@ -333,6 +342,8 @@ export function buildCharacterStates(project: StudioProject, previous?: Record<s
     const old = previous?.[asset.id];
     const state: CharacterProductionState = {
       assetId: asset.id, assetNumber: asset.projectNumber, identityReference: asset.generatedFileName,
+      languageLock: old?.languageLock ?? project.dialogueLanguage,
+      dialectLock: old?.dialectLock ?? 'Character and region appropriate',
       currentAppearance: {
         costumeAssetNumbers: currentCostumes(project, asset), damage: asset.currentState.damage,
         transformation: asset.currentState.transformation,
@@ -411,6 +422,7 @@ export function buildSequenceScenario(project: StudioProject, sequence: StudioSe
     activeStoryObjective: previous?.activeStoryObjective ?? project.story.conflict,
     escalationScore: previous?.escalationScore ?? Math.min(100, Math.round((sequence.number / project.sequenceCount) * 100)),
     location: sequence.location, timeOfDay: sequence.timeOfDay, characterAssetIds: [...sequence.assetManifest.characters],
+    nonSpeakingCharacterAssetIds: previous?.nonSpeakingCharacterAssetIds ?? sequence.assetManifest.characters.filter((id) => !dialogue.some((line) => line.speakerAssetId === id)),
     characterContinuity: sequence.assetManifest.characters.map((id) => {
       const asset = project.assets.find((item) => item.id === id)!;
       const state = characterStates?.[id];
@@ -454,7 +466,7 @@ export function buildSequenceScenario(project: StudioProject, sequence: StudioSe
   };
 }
 
-export function rankSequenceReferences(project: StudioProject, sequence: StudioSequence, dialogue: DialogueLine[], previousFrameKey: string | null, maximumReferenceImages: number | null): RankedSequenceReference[] {
+export function rankSequenceReferences(project: StudioProject, sequence: StudioSequence, dialogue: DialogueLine[], previousFrameKey: string | null, maximumReferenceImages: number | null, previousVideoKey: string | null = null): RankedSequenceReference[] {
   const speakerIds = new Set(dialogue.map((line) => line.speakerAssetId));
   const refs: Array<Omit<RankedSequenceReference, 'uploadOrder'> & { group: number }> = project.assets.filter((asset) => sequence.assetIds.includes(asset.id)).map((asset) => {
     const role = categoryRole(asset);
@@ -463,7 +475,8 @@ export function rankSequenceReferences(project: StudioProject, sequence: StudioS
     const limitPriority = speaker ? 1000 : role === 'Identity' ? 900 : role === 'Current appearance' ? 860 : role === 'Costume' ? 820 : role === 'Creature or animal' ? 760 : role === 'Location' ? 720 : asset.importance === 'Story critical' ? 680 : asset.importance === 'Recurring' ? 620 : 300;
     return { id: `asset:${asset.id}`, role, group, limitPriority, assetId: asset.id, assetNumber: asset.projectNumber, fileName: asset.generatedFileName, reason: speaker ? 'Exact dialogue speaker; never substitute another identity.' : `${role} reference for this scenario.`, required: speaker || asset.importance !== 'Background' && asset.importance !== 'Incidental', included: true };
   });
-  if (previousFrameKey) refs.push({ id: `continuity:${sequence.number - 1}`, role: 'Previous continuity', group: 8, limitPriority: 1100, assetId: null, assetNumber: null, fileName: previousFrameKey, reason: 'Actual approved ending frame from the previous sequence.', required: true, included: true });
+  if (previousVideoKey) refs.push({ id: `continuity-video:${sequence.number - 1}`, role: 'Previous continuity', group: 8, limitPriority: 1120, assetId: null, assetNumber: null, fileName: previousVideoKey, reason: 'Exact approved previous sequence video for motion, performance, and temporal continuity.', required: true, included: true });
+  if (previousFrameKey) refs.push({ id: `continuity-frame:${sequence.number - 1}`, role: 'Previous continuity', group: 9, limitPriority: 1100, assetId: null, assetNumber: null, fileName: previousFrameKey, reason: 'Actual approved ending frame from the previous sequence.', required: true, included: true });
   if (maximumReferenceImages !== null && refs.length > maximumReferenceImages) {
     const selected = new Set([...refs].sort((a, b) => b.limitPriority - a.limitPriority || a.group - b.group || (a.assetNumber ?? 9999) - (b.assetNumber ?? 9999)).slice(0, maximumReferenceImages).map((item) => item.id));
     refs.forEach((item) => { item.included = selected.has(item.id); });
@@ -473,13 +486,14 @@ export function rankSequenceReferences(project: StudioProject, sequence: StudioS
 
 export function compileSeedancePrompt(project: StudioProject, sequence: StudioSequence, scenario: SequenceScenario, references: RankedSequenceReference[], restrictions: string[], correctionRules: CorrectionMemoryRule[]) {
   const included = references.filter((item) => item.included);
-  const dialogue = scenario.dialogue.length ? scenario.dialogue.map((line) => `${line.turnOrder}. ${line.startSecond}-${line.endSecond}s — Asset ${numberLabel(line.speakerAssetNumber)} (${line.speakerName}) says exactly “${line.exactDialogue}”; ${line.emotion}; ${line.expression}; ${line.physicalAction}; listeners ${line.speakerLock.listenerAssetIds.join(', ') || 'none'}; then reaction assets ${line.reactionAssetIds.join(', ') || 'none'}.`).join('\n') : 'No spoken dialogue. Do not invent words.';
+  const dialogue = scenario.dialogue.length ? scenario.dialogue.map((line) => `${line.turnOrder}. ${line.startSecond}-${line.endSecond}s — Asset ${numberLabel(line.speakerAssetNumber)} (${line.speakerName}) says exactly “${line.exactDialogue}”; locked language ${line.languageLock}; locked dialect ${line.dialectLock}; pronunciation ${line.pronunciations.map((item) => `${item.text} = ${item.pronunciation}${item.phonetic ? ` (${item.phonetic})` : ''}`).join(', ') || 'standard'}; ${line.emotion}; ${line.expression}; ${line.physicalAction}; listeners ${line.speakerLock.listenerAssetIds.join(', ') || 'none'}; then reaction assets ${line.reactionAssetIds.join(', ') || 'none'}.`).join('\n') : 'No spoken dialogue. Do not invent words.';
   return [
     `[SCENARIO]\n${scenario.id}. ${scenario.purposeCategory}: ${scenario.purpose}. Objective: ${scenario.activeStoryObjective}. Story development: ${scenario.storyDevelopment}.`,
     `[TIMING]\nExactly ${sequence.duration} seconds. Opening ${scenario.openingSituation}. Actions: ${scenario.actions.map((action) => `${action.startSecond}-${action.endSecond}s Asset ${numberLabel(action.actorAssetNumber)} ${action.verb}`).join('; ')}. Ending ${scenario.endingSituation}.`,
     `[CHARACTERS]\n${scenario.characterContinuity.map((state) => { const asset = project.assets.find((item) => item.id === state.assetId)!; return `Asset ${numberLabel(asset.projectNumber)} = ${asset.name}; permanent identity ${asset.generatedFileName}; costume assets ${state.currentAppearance.costumeAssetNumbers.map(numberLabel).join(', ') || 'story-defined'}; damage ${state.currentAppearance.damage}; transformation ${state.currentAppearance.transformation}; emotion ${state.emotion}; motivation ${state.motivation}; position ${state.position}; direction ${state.screenDirection}; knows before sequence: ${state.knowledgeBeforeSequence.map((item) => `${item.kind} ${item.fact}`).join('; ') || 'only approved prior story events'}.`; }).join('\n') || 'No named character.'}`,
     `[REFERENCE BINDINGS — ATTACH IN THIS ORDER]\n${included.map((item) => `${item.uploadOrder}. ${item.assetNumber ? `Asset ${numberLabel(item.assetNumber)} — ` : ''}${item.fileName} — ${item.role}: ${item.reason}`).join('\n') || 'No external reference.'}`,
     `[DIALOGUE BINDINGS]\n${dialogue}`,
+    `[NON-SPEAKING CHARACTERS]\n${scenario.nonSpeakingCharacterAssetIds.map((id) => { const asset = project.assets.find((item) => item.id === id); return asset ? `Asset ${numberLabel(asset.projectNumber)} (${asset.name}) is present but must not speak, mouth words, or receive another character's line.` : id; }).join('\n') || 'None.'}`,
     `[ACTIONS AND OWNERSHIP]\n${scenario.actions.map((action) => `${action.order}. Asset ${numberLabel(action.actorAssetNumber)} owns “${action.verb}”; target ${action.targetAssetNumber ? `Asset ${numberLabel(action.targetAssetNumber)}` : 'none'}; hand ${action.hand}; screen direction ${action.screenDirection}; before ${action.objectVisibilityBefore}/${action.containmentBefore}; after ${action.objectVisibilityAfter}/${action.containmentAfter}; result ${action.resultingState}.`).join('\n')}`,
     `[ENVIRONMENT]\nWind ${scenario.environmentalActivity.wind}; fabric ${scenario.environmentalActivity.fabric}; traffic ${scenario.environmentalActivity.traffic}; crowd ${scenario.environmentalActivity.crowd}; water ${scenario.environmentalActivity.water}; fire ${scenario.environmentalActivity.fire}; smoke ${scenario.environmentalActivity.smoke}; dust ${scenario.environmentalActivity.dust}; vegetation ${scenario.environmentalActivity.vegetation}; mechanical ${scenario.environmentalActivity.mechanical}. Background count ${scenario.backgroundControl.exactCount}.`,
     `[PROPS, HANDS, CONTAINMENT, VISIBILITY]\n${scenario.propContinuity.map((prop) => `Asset ${numberLabel(prop.assetNumber)}: ${prop.visibility}; owner ${prop.owner}; holder ${prop.holder}; location ${prop.location}; container ${prop.container}; hand ${prop.hand}; condition ${prop.condition}.`).join('\n') || 'No critical prop.'}`,

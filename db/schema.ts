@@ -1,4 +1,5 @@
-import { index, integer, sqliteTable, text, uniqueIndex } from 'drizzle-orm/sqlite-core';
+import { sql } from 'drizzle-orm';
+import { check, index, integer, sqliteTable, text, uniqueIndex } from 'drizzle-orm/sqlite-core';
 
 const timestamps = {
   createdAt: text('created_at').notNull(),
@@ -405,4 +406,118 @@ export const projectRecoverySnapshots = sqliteTable(
     createdAt: text('created_at').notNull(),
   },
   (table) => [index('idx_project_recovery_project_created').on(table.projectId, table.createdAt)],
+);
+
+export const projectTransactions = sqliteTable('project_transactions', {
+  projectId: text('project_id').primaryKey().references(() => projects.id, { onDelete: 'cascade' }),
+  revision: integer('revision').notNull().default(0),
+  lastTransactionId: text('last_transaction_id').notNull(),
+  updatedAt: text('updated_at').notNull(),
+});
+
+export const transactionGuards = sqliteTable(
+  'transaction_guards',
+  {
+    id: text('id').primaryKey(),
+    projectId: text('project_id').notNull().references(() => projects.id, { onDelete: 'cascade' }),
+    revisionOk: integer('revision_ok').notNull(),
+    createdAt: text('created_at').notNull(),
+  },
+  (table) => [index('idx_transaction_guards_project').on(table.projectId), check('transaction_revision_must_match', sql`${table.revisionOk} = 1`)],
+);
+
+export const operationLocks = sqliteTable(
+  'operation_locks',
+  {
+    id: text('id').primaryKey(),
+    projectId: text('project_id').notNull().references(() => projects.id, { onDelete: 'cascade' }),
+    scope: text('scope').notNull(),
+    ownerToken: text('owner_token').notNull(),
+    expiresAt: text('expires_at').notNull(),
+    createdAt: text('created_at').notNull(),
+  },
+  (table) => [uniqueIndex('idx_operation_locks_project_scope').on(table.projectId, table.scope)],
+);
+
+export const productionChangeLog = sqliteTable(
+  'production_change_log',
+  {
+    id: text('id').primaryKey(),
+    projectId: text('project_id').notNull().references(() => projects.id, { onDelete: 'cascade' }),
+    revision: integer('revision').notNull(),
+    scope: text('scope').notNull(),
+    summary: text('summary').notNull(),
+    beforeSnapshotId: text('before_snapshot_id'),
+    afterStateHash: text('after_state_hash').notNull(),
+    createdAt: text('created_at').notNull(),
+  },
+  (table) => [index('idx_change_log_project_revision').on(table.projectId, table.revision)],
+);
+
+export const fileIntegrity = sqliteTable(
+  'file_integrity',
+  {
+    referenceId: text('reference_id').primaryKey().references(() => assetReferences.id, { onDelete: 'cascade' }),
+    projectId: text('project_id').notNull().references(() => projects.id, { onDelete: 'cascade' }),
+    fingerprintSha256: text('fingerprint_sha256').notNull(),
+    previewMediaKey: text('preview_media_key'),
+    previewKind: text('preview_kind').notNull().default('none'),
+    integrityStatus: text('integrity_status').notNull().default('Original'),
+    verifiedAt: text('verified_at').notNull(),
+  },
+  (table) => [uniqueIndex('idx_file_integrity_project_fingerprint').on(table.projectId, table.fingerprintSha256)],
+);
+
+export const projectImports = sqliteTable(
+  'project_imports',
+  {
+    id: text('id').primaryKey(),
+    projectId: text('project_id').notNull().references(() => projects.id, { onDelete: 'cascade' }),
+    importKind: text('import_kind').notNull(),
+    sourceName: text('source_name').notNull(),
+    fingerprintSha256: text('fingerprint_sha256'),
+    manifestJson: text('manifest_json').notNull(),
+    createdAt: text('created_at').notNull(),
+  },
+  (table) => [index('idx_project_imports_project_created').on(table.projectId, table.createdAt)],
+);
+
+export const reservedNumbers = sqliteTable(
+  'reserved_numbers',
+  {
+    id: text('id').primaryKey(),
+    projectId: text('project_id').notNull().references(() => projects.id, { onDelete: 'cascade' }),
+    kind: text('kind').notNull(),
+    number: integer('number').notNull(),
+    stableId: text('stable_id').notNull(),
+    status: text('status').notNull(),
+    reservedAt: text('reserved_at').notNull(),
+  },
+  (table) => [uniqueIndex('idx_reserved_numbers_project_kind_number').on(table.projectId, table.kind, table.number)],
+);
+
+export const finalSequenceSources = sqliteTable(
+  'final_sequence_sources',
+  {
+    id: text('id').primaryKey(),
+    projectId: text('project_id').notNull().references(() => projects.id, { onDelete: 'cascade' }),
+    sequenceNumber: integer('sequence_number').notNull(),
+    resultMediaKey: text('result_media_key').notNull(),
+    provenanceJson: text('provenance_json').notNull(),
+    approvedAt: text('approved_at').notNull(),
+  },
+  (table) => [uniqueIndex('idx_final_sources_project_sequence').on(table.projectId, table.sequenceNumber)],
+);
+
+export const providerCapabilityVersions = sqliteTable(
+  'provider_capability_versions',
+  {
+    id: text('id').primaryKey(),
+    projectId: text('project_id').notNull().references(() => projects.id, { onDelete: 'cascade' }),
+    profileId: text('profile_id').notNull(),
+    revision: text('revision').notNull(),
+    capabilityJson: text('capability_json').notNull(),
+    refreshedAt: text('refreshed_at').notNull(),
+  },
+  (table) => [uniqueIndex('idx_provider_capability_project_profile_revision').on(table.projectId, table.profileId, table.revision)],
 );
