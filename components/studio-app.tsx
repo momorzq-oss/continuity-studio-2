@@ -21,7 +21,6 @@ import {
   LoaderCircle,
   Lock,
   Menu,
-  Mic,
   Moon,
   Network,
   Paperclip,
@@ -327,13 +326,24 @@ function SequenceCard({ project, sequence, onAction }: { project: StudioProject;
           <div className="mt-2 flex h-7 overflow-hidden rounded-lg border border-border bg-background/55">{plan.timing.map((beat, index) => <div key={beat.id} title={`${beat.startSecond}–${beat.endSecond}s · ${beat.label}`} className={cn('grid min-w-0 place-items-center border-r border-background/60 px-1 text-[8px] font-medium last:border-r-0', index % 2 ? 'bg-sky-400/10 text-sky-200' : 'bg-amber-300/10 text-amber-200')} style={{ width: `${((beat.endSecond - beat.startSecond) / sequence.duration) * 100}%` }}><span className="truncate">{beat.label}</span></div>)}</div>
         </div>
         <div className="grid gap-3 text-xs sm:grid-cols-3">
-          <StateBlock label="Shot intelligence" value={`${plan.shots.length} shots · lens, blocking, eyeline, depth, speed`} />
-          <StateBlock label="Dialogue & voice" value={`${plan.dialogue.length} line${plan.dialogue.length === 1 ? '' : 's'} · ${plan.dialoguePath}`} />
+          <StateBlock label="Scenario engine" value={`${plan.scenario.purposeCategory} · ${plan.scenario.actions.length} owned actions · escalation ${plan.scenario.escalationScore}%`} />
+          <StateBlock label="Dialogue & speaker lock" value={`${plan.dialogue.length} exact timed line${plan.dialogue.length === 1 ? '' : 's'} · Seedance generates sound in-video`} />
           <StateBlock label="Conflict check" value={plan.conflicts.length ? `${plan.conflicts.length} open` : 'Passed'} />
         </div>
+        <div className="grid gap-3 text-xs sm:grid-cols-3">
+          <StateBlock label="Transition" value={`${plan.scenario.transition.type} · ${plan.scenario.transition.continuityStrength}`} />
+          <StateBlock label="Reference readiness" value={`${plan.referencePackage.rankedReferences.filter((reference) => reference.included).length} included · ${plan.referencePackage.excludedReferenceIds.length} excluded`} />
+          <StateBlock label="Generation readiness" value={plan.readinessChecklist.readyForGeneration ? 'Ready — every gate passed' : `${plan.readinessChecklist.blockers.length} blocker${plan.readinessChecklist.blockers.length === 1 ? '' : 's'}`} />
+        </div>
+        <details className="rounded-xl border border-border bg-background/50 p-3">
+          <summary className="cursor-pointer text-xs font-medium">Structured scenario & state delta</summary>
+          <div className="mt-3 grid gap-2 text-[10px] leading-5 text-muted-foreground sm:grid-cols-2"><p><span className="font-medium text-foreground">Opening:</span> {plan.scenario.sceneStateDelta.opening}</p><p><span className="font-medium text-foreground">Ending:</span> {plan.scenario.sceneStateDelta.ending}</p><p><span className="font-medium text-foreground">Objective:</span> {plan.scenario.activeStoryObjective}</p><p><span className="font-medium text-foreground">Next:</span> {plan.scenario.connectionToNext}</p></div>
+          <ul className="mt-2 space-y-1 text-[10px] leading-5 text-muted-foreground">{plan.scenario.actions.map((action) => <li key={action.id}>Asset {assetNumber(action.actorAssetNumber)} owns {action.verb} · {action.startSecond}–{action.endSecond}s</li>)}</ul>
+        </details>
         <details className="rounded-xl border border-border bg-background/50 p-3">
           <summary className="cursor-pointer text-xs font-medium">Reference package & priority rules</summary>
           <p className="mt-3 text-[10px] leading-5 text-muted-foreground">{plan.referencePackage.uploadInstruction}</p>
+          <ol className="mt-2 space-y-1 text-[10px] leading-5 text-muted-foreground">{plan.referencePackage.rankedReferences.map((reference) => <li key={reference.id} className={reference.included ? '' : 'line-through opacity-55'}>{reference.uploadOrder}. {reference.assetNumber ? `Asset ${assetNumber(reference.assetNumber)} · ` : ''}{reference.fileName} · {reference.role}{reference.included ? '' : ' · excluded by provider limit'}</li>)}</ol>
           <ul className="mt-2 space-y-1 text-[10px] leading-5 text-muted-foreground">{plan.referencePackage.priorityRules.map((rule) => <li key={rule}>{rule}</li>)}</ul>
         </details>
         <details className="rounded-xl border border-border bg-background/50 p-3">
@@ -417,11 +427,13 @@ function ProductionReadinessCard({ project, onAction }: { project: StudioProject
   return (
     <section className="mt-4 rounded-2xl border border-border bg-card/65 p-4">
       <div className="flex items-start justify-between gap-4"><div><p className="text-sm font-medium">Production control</p><p className="mt-1 text-xs text-muted-foreground">{project.production.currentPipelineStage} · autosaved {relativeTime(project.production.autosave.lastSavedAt)}</p></div><Badge variant="outline" className={statusClass(project.production.readiness)}>{project.production.readiness}</Badge></div>
-      <div className="mt-4 grid gap-3 text-xs sm:grid-cols-4">
+      <div className="mt-4 grid gap-3 text-xs sm:grid-cols-3 lg:grid-cols-6">
         <StateBlock label="Dependencies" value={impacts.length ? `${impacts.length} affected` : 'All current'} />
         <StateBlock label="Render queue" value={`${project.production.renderQueue.length} jobs`} />
         <StateBlock label="Attempts" value={`${ledger.generationCount} · ${ledger.estimatedCredits} credits`} />
         <StateBlock label="Checkpoints" value={`${project.production.checkpoints.length} saved`} />
+        <StateBlock label="Repetition" value={project.production.repetitionFindings.length ? `${project.production.repetitionFindings.length} review` : 'Clear'} />
+        <StateBlock label="Movie audit" value={project.production.completionAudit.status} />
       </div>
       <div className="mt-3 rounded-xl bg-background/55 p-3 text-xs leading-5 text-foreground/80"><span className="font-medium">Next logical action:</span> {project.production.nextLogicalAction}</div>
       {impacts.length > 0 && <div className="mt-3 flex flex-wrap gap-1.5">{impacts.slice(0, 6).map((impact) => <Badge key={impact.id} variant="outline" className={statusClass(impact.freshness)}>{impact.targetId} · {impact.freshness}</Badge>)}</div>}
@@ -432,7 +444,7 @@ function ProductionReadinessCard({ project, onAction }: { project: StudioProject
 
 function DialogueCard({ project, sequence }: { project: StudioProject; sequence: StudioSequence }) {
   const plan = project.production.sequencePlans[sequence.id];
-  return <section className="mt-4 rounded-2xl border border-border bg-card/65 p-4"><div className="flex items-center justify-between gap-3"><div className="flex items-center gap-2"><Mic className="size-4 text-amber-300" /><p className="text-sm font-medium">Dialogue & voice ownership</p></div><Badge variant="outline">{plan.dialoguePath}</Badge></div><div className="mt-4 space-y-2">{plan.dialogue.length ? plan.dialogue.map((line) => <div key={line.id} className="rounded-xl bg-background/55 p-3"><div className="flex items-center justify-between gap-3 text-xs"><span className="font-medium">Asset {assetNumber(line.speakerAssetNumber)} · {project.assets.find((asset) => asset.id === line.speakerAssetId)?.name}</span><span className="tabular-nums text-muted-foreground">{line.startSecond}–{line.endSecond}s</span></div><p className="mt-2 text-sm">“{line.exactDialogue}”</p><p className="mt-2 text-[10px] leading-5 text-muted-foreground">{line.language} · {line.accent} · {line.emotion} · {line.physicalAction}</p></div>) : <p className="text-xs text-muted-foreground">No dialogue is authored. The sequence remains explicitly silent.</p>}</div></section>;
+  return <section className="mt-4 rounded-2xl border border-border bg-card/65 p-4"><div className="flex items-center justify-between gap-3"><div className="flex items-center gap-2"><Clapperboard className="size-4 text-amber-300" /><p className="text-sm font-medium">Dialogue & Seedance speaker lock</p></div><Badge variant="outline">{plan.dialogue.length ? `${plan.dialogue.length} bound` : 'No dialogue'}</Badge></div><p className="mt-2 text-[10px] leading-5 text-muted-foreground">Continuity Studio stores exact text, timing, speaker identity, current appearance, action, listeners, and reactions. Seedance generates the spoken result inside the video; no separate sound asset is created.</p><div className="mt-4 space-y-2">{plan.dialogue.length ? plan.dialogue.map((line) => <div key={line.id} className="rounded-xl bg-background/55 p-3"><div className="flex items-center justify-between gap-3 text-xs"><span className="font-medium">Turn {line.turnOrder} · Asset {assetNumber(line.speakerAssetNumber)} · {line.speakerName}</span><span className="tabular-nums text-muted-foreground">{line.startSecond}–{line.endSecond}s</span></div><p className="mt-2 text-sm">“{line.exactDialogue}”</p><p className="mt-2 text-[10px] leading-5 text-muted-foreground">{line.language} · {line.dialect} · {line.emotion} · {line.expression} · {line.physicalAction}</p><p className="mt-1 font-mono text-[9px] leading-4 text-muted-foreground">References: {line.requiredVisualReferences.map((reference) => reference.assetNumber ? `Asset ${assetNumber(reference.assetNumber)}` : reference.fileName).join(', ')}</p></div>) : <p className="text-xs text-muted-foreground">No spoken dialogue is authored. Seedance may generate only the scenario’s ambience, effects, requested music, and intentional silence.</p>}</div></section>;
 }
 
 function ValidationCard({ project, sequence, onAction }: { project: StudioProject; sequence: StudioSequence; onAction: (message: string) => void }) {
@@ -738,9 +750,8 @@ export function StudioApp() {
               <textarea ref={textareaRef} id="movie-idea" rows={2} value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={onComposerKeyDown} placeholder={project ? 'Ask for a change, show an asset, or continue the movie…' : 'Describe the movie you want to make…'} className="max-h-40 min-h-[54px] w-full resize-none bg-transparent px-2.5 py-2 text-[15px] leading-6 outline-none placeholder:text-muted-foreground/65" />
               <div className="flex items-center justify-between pt-1">
                 <div className="flex items-center gap-1">
-                  <input ref={fileInputRef} type="file" multiple className="sr-only" accept="image/*,video/*,audio/*,.pdf,.doc,.docx,.txt" onChange={(event) => setFiles((current) => [...current, ...Array.from(event.target.files ?? [])])} />
+                  <input ref={fileInputRef} type="file" multiple className="sr-only" accept="image/*,video/*,.pdf,.doc,.docx,.txt" onChange={(event) => setFiles((current) => [...current, ...Array.from(event.target.files ?? [])])} />
                   <Button type="button" variant="ghost" size="icon" className="rounded-full" onClick={() => fileInputRef.current?.click()} aria-label="Attach reference"><Paperclip className="size-[18px]" strokeWidth={1.7} /></Button>
-                  <Button type="button" variant="ghost" size="icon" className="rounded-full" disabled title="Microphone input is optional and not enabled in this browser" aria-label="Microphone unavailable"><Mic className="size-[18px]" strokeWidth={1.7} /></Button>
                   {project && <span className="ml-1 hidden text-[10px] text-muted-foreground sm:inline">Try /assets, “show Asset 007”, “download all assets”</span>}
                 </div>
                 <Button type="submit" size="icon" disabled={working || (!draft.trim() && files.length === 0)} className="size-9 rounded-full" aria-label="Send instruction">{working ? <LoaderCircle className="animate-spin" /> : <ArrowUp className="size-[18px]" strokeWidth={2} />}</Button>
@@ -812,7 +823,7 @@ function SettingsView({ project, lightMode, setLightMode, onUpdate }: { project:
   const settingSections = [
     { title: 'AI Brain', icon: Sparkles, description: 'Automatic Mode interprets instructions and chooses the normal next production step.', control: <Switch checked={project?.settings.automaticMode ?? true} onCheckedChange={(checked) => onUpdate({ automaticMode: checked })} disabled={!project} /> },
     { title: 'Image Generation', icon: ImageIcon, description: project?.settings.imageProvider === 'Not connected' ? 'No image provider connected. Prompts and references remain safe until you choose one.' : project?.settings.imageProvider ?? 'Not connected', control: <Badge variant="outline">Not connected</Badge> },
-    { title: 'Video Generation', icon: Film, description: 'Provider-neutral sequence packages adapt to a connected model only after its duration, resolution, reference, audio, prompt, image-to-video, and cost limits are known.', control: <Badge variant="outline" className="border-sky-400/20 bg-sky-400/10 text-sky-200">Package ready</Badge> },
+    { title: 'Video Generation', icon: Film, description: 'Provider-neutral Seedance packages adapt only after duration, resolution, reference count, in-video sound, prompt, image-to-video, and cost limits are known. No separate sound library exists.', control: <Badge variant="outline" className="border-sky-400/20 bg-sky-400/10 text-sky-200">Package ready</Badge> },
     { title: 'Storage', icon: Upload, description: 'Structured project memory and original media are stored separately and isolated by project ID.', control: <Badge variant="outline">Private</Badge> },
     { title: 'Appearance', icon: lightMode ? Sun : Moon, description: 'Choose the interface contrast for this device.', control: <Switch checked={lightMode} onCheckedChange={setLightMode} /> },
     { title: 'Privacy', icon: Lock, description: 'Media is sent to a provider only when you request generation. API keys never enter exports.', control: <Switch checked={project?.settings.privacyMode ?? true} onCheckedChange={(checked) => onUpdate({ privacyMode: checked })} disabled={!project} /> },

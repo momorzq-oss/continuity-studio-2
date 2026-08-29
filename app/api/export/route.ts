@@ -29,13 +29,13 @@ export async function GET(request: Request) {
       'SELECT id, role, content, metadata_json, created_at FROM chat_messages WHERE project_id = ? ORDER BY created_at ASC',
     ).bind(projectId).all();
     const references = await DB.prepare(
-      'SELECT id, asset_id, original_name, media_key, content_type, byte_size, role, created_at FROM asset_references WHERE project_id = ? ORDER BY created_at ASC',
+      "SELECT id, asset_id, original_name, media_key, content_type, byte_size, role, created_at FROM asset_references WHERE project_id = ? AND content_type NOT LIKE 'audio/%' ORDER BY created_at ASC",
     ).bind(projectId).all<{ id: string; asset_id: string | null; original_name: string; media_key: string; content_type: string; byte_size: number; role: string; created_at: string }>();
     const jobs = await DB.prepare(
       'SELECT id, target_id, provider, model, prompt_version, status, failure_message, started_at, updated_at FROM generation_jobs WHERE project_id = ? ORDER BY started_at ASC',
     ).bind(projectId).all();
     const productionRecords = await DB.prepare(
-      'SELECT record_type, stable_key, status, sequence_number, content_json, updated_at FROM production_records WHERE project_id = ? ORDER BY record_type, sequence_number, stable_key',
+      "SELECT record_type, stable_key, status, sequence_number, content_json, updated_at FROM production_records WHERE project_id = ? AND record_type NOT IN ('voice-identity', 'audio-asset', 'ambience-asset', 'sound-effect-asset', 'music-asset') ORDER BY record_type, sequence_number, stable_key",
     ).bind(projectId).all();
     const recoverySnapshots = await DB.prepare(
       'SELECT id, reason, state_json, created_at FROM project_recovery_snapshots WHERE project_id = ? ORDER BY created_at ASC',
@@ -78,7 +78,13 @@ export async function GET(request: Request) {
       [`${root}/production/render_queue.json`]: text(project.production.renderQueue),
       [`${root}/production/cost_ledger.json`]: text(project.production.costLedger),
       [`${root}/production/model_capabilities.json`]: text(project.production.modelCapabilities),
-      [`${root}/production/voice_identities.json`]: text(project.production.voiceIdentities),
+      [`${root}/production/character_states.json`]: text(project.production.characterStates),
+      [`${root}/production/story_threads.json`]: text(project.production.storyThreads),
+      [`${root}/production/repetition_findings.json`]: text(project.production.repetitionFindings),
+      [`${root}/production/correction_memory.json`]: text(project.production.correctionMemory),
+      [`${root}/production/generation_snapshots.json`]: text(project.production.generationSnapshots),
+      [`${root}/production/movie_completion_audit.json`]: text(project.production.completionAudit),
+      [`${root}/production/sound_generation_policy.json`]: text(project.production.audioPolicy),
       [`${root}/production/asset_lineage.json`]: text(project.production.assetLineage),
       [`${root}/production/validation_reports.json`]: text(project.production.validations),
       [`${root}/production/corrections.json`]: text(project.production.corrections),
@@ -108,7 +114,9 @@ export async function GET(request: Request) {
       const productionPlan = project.production.sequencePlans[sequence.id];
       files[`${root}/timing/${sequence.id}_TIMING_V${String(productionPlan.revision).padStart(2, '0')}.json`] = text(productionPlan.timing);
       files[`${root}/shots/${sequence.id}_SHOTS_V${String(productionPlan.revision).padStart(2, '0')}.json`] = text(productionPlan.shots);
-      files[`${root}/dialogue/${sequence.id}_DIALOGUE_V${String(productionPlan.revision).padStart(2, '0')}.json`] = text({ path: productionPlan.dialoguePath, audioInstruction: productionPlan.shotAudioInstruction, lines: productionPlan.dialogue });
+      files[`${root}/scenarios/${sequence.id}_SCENARIO_V${String(productionPlan.revision).padStart(2, '0')}.json`] = text(productionPlan.scenario);
+      files[`${root}/dialogue/${sequence.id}_DIALOGUE_V${String(productionPlan.revision).padStart(2, '0')}.json`] = text({ generationOwner: 'Seedance video generation', exactSpeakerBindings: productionPlan.dialogue });
+      files[`${root}/readiness/${sequence.id}_READINESS_V${String(productionPlan.revision).padStart(2, '0')}.json`] = text(productionPlan.readinessChecklist);
       files[`${root}/reference_packages/${sequence.id}_REFERENCE_PACKAGE_V${String(productionPlan.revision).padStart(2, '0')}.json`] = text(productionPlan.referencePackage);
       files[`${root}/conflict_checks/${sequence.id}_CONFLICTS_V${String(productionPlan.revision).padStart(2, '0')}.json`] = text(productionPlan.conflicts);
       files[`${root}/sequence_versions/${sequence.id}_REVISION_HISTORY.json`] = text(productionPlan.revisions);

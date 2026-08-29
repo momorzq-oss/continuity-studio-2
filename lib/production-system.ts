@@ -1,4 +1,29 @@
 import type { StudioAsset, StudioProject, StudioSequence } from './studio';
+import {
+  buildCharacterStates,
+  buildMovieCompletionAudit,
+  buildSequenceScenario,
+  buildStoryThreads,
+  compileSeedancePrompt,
+  createDialogueLine,
+  detectProductionRepetition,
+  normalizeDialogueLines,
+  rankSequenceReferences,
+} from './scenario-engine';
+import type {
+  CharacterProductionState,
+  CorrectionMemoryRule,
+  DialogueLine,
+  GenerationSnapshot,
+  MovieCompletionAudit,
+  RankedSequenceReference,
+  RepetitionFinding,
+  SequenceReadinessChecklist,
+  SequenceScenario,
+  StoryThread,
+} from './scenario-engine';
+
+export type { DialogueLine } from './scenario-engine';
 
 export type FreshnessStatus = 'Current' | 'Needs Review' | 'Outdated' | 'Missing Reference' | 'Ready';
 export type ProductionReadiness =
@@ -10,7 +35,6 @@ export type ProductionReadiness =
   | 'Final Review'
   | 'Completed';
 export type RenderStatus = 'Waiting' | 'Preparing' | 'Generating' | 'Completed' | 'Failed' | 'Needs Review' | 'Approved';
-export type DialogueGenerationPath = 'Direct in video model' | 'Generate afterward' | 'Lip-synced audio' | 'Voice first' | 'Silent';
 
 export interface DependencyImpact {
   id: string;
@@ -50,33 +74,6 @@ export interface ShotInstruction {
   movementSpeed: string;
 }
 
-export interface DialogueLine {
-  id: string;
-  speakerAssetId: string;
-  speakerAssetNumber: number;
-  exactDialogue: string;
-  language: string;
-  accent: string;
-  emotion: string;
-  startSecond: number;
-  endSecond: number;
-  physicalAction: string;
-}
-
-export interface VoiceIdentity {
-  characterAssetId: string;
-  characterAssetNumber: number;
-  identityLabel: string;
-  language: string;
-  accent: string;
-  vocalAge: string;
-  timbre: string;
-  pace: string;
-  emotionalRange: string;
-  referenceAttachmentIds: string[];
-  approvalStatus: 'Pending' | 'Approved' | 'Locked';
-}
-
 export interface PromptConflict {
   id: string;
   type: 'Count' | 'Wardrobe' | 'Location' | 'Day/Night' | 'Camera' | 'Dialogue' | 'Asset' | 'Continuity' | 'Model capability';
@@ -95,7 +92,9 @@ export interface SequenceReferencePackage {
   previousEndingFrameKey: string | null;
   prompt: string;
   dialogue: DialogueLine[];
-  audioReferenceIds: string[];
+  rankedReferences: RankedSequenceReference[];
+  excludedReferenceIds: string[];
+  providerReferenceLimit: number | null;
   continuityInstruction: string;
   negativeConstraints: string[];
   priorityRules: string[];
@@ -131,9 +130,9 @@ export interface SequenceProductionPlan {
   sequenceNumber: number;
   timing: TimingBeat[];
   shots: ShotInstruction[];
+  scenario: SequenceScenario;
   dialogue: DialogueLine[];
-  dialoguePath: DialogueGenerationPath;
-  shotAudioInstruction: string;
+  compiledPrompt: string;
   referencePackage: SequenceReferencePackage;
   conflicts: PromptConflict[];
   negativeContinuityRules: string[];
@@ -150,6 +149,7 @@ export interface SequenceProductionPlan {
   actualOpeningFrame: string | null;
   lastFrameKey: string | null;
   checkpointIds: string[];
+  readinessChecklist: SequenceReadinessChecklist;
 }
 
 export interface AssetLineage {
@@ -183,10 +183,13 @@ export interface RenderQueueItem {
   actualCostUsd: number | null;
   prompt: string;
   referencePackageId: string;
+  generationSnapshotId: string;
   assetNumbers: number[];
   continuityState: string;
   failureMessage: string | null;
   retryHistory: Array<{ attempt: number; at: string; reason: string }>;
+  resultMediaKey: string | null;
+  continuityFrameKey: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -231,7 +234,7 @@ export interface ModelCapabilityProfile {
   supportedResolutions: string[];
   referenceImageSupport: 'Unknown' | 'Supported' | 'Unsupported';
   maximumReferenceImages: number | null;
-  audioSupport: 'Unknown' | 'Supported' | 'Unsupported';
+  generatedSoundInVideo: 'Unknown' | 'Supported' | 'Unsupported';
   promptCharacterLimit: number | null;
   imageToVideo: 'Unknown' | 'Supported' | 'Unsupported';
   limitationPolicy: string;
@@ -243,7 +246,7 @@ export interface FinalAssemblyPlan {
   status: 'Blocked' | 'Ready' | 'In Progress' | 'Needs Review' | 'Approved';
   orderedSequenceNumbers: number[];
   transitionPlan: string[];
-  audioPlan: string[];
+  soundContinuityPlan: string[];
   colorPlan: string[];
   stabilizationPlan: string[];
   creditsPlan: string;
@@ -259,7 +262,7 @@ export interface FinalQualityReport {
 }
 
 export interface ProductionSystem {
-  schemaVersion: 1;
+  schemaVersion: 2;
   pipelineStages: string[];
   currentPipelineStage: string;
   readiness: ProductionReadiness;
@@ -267,7 +270,17 @@ export interface ProductionSystem {
   storyLock: { status: 'Unlocked' | 'Locked' | 'Needs Review'; lockedAt: string | null; reason: string };
   dependencies: DependencyImpact[];
   sequencePlans: Record<string, SequenceProductionPlan>;
-  voiceIdentities: Record<string, VoiceIdentity>;
+  characterStates: Record<string, CharacterProductionState>;
+  storyThreads: StoryThread[];
+  repetitionFindings: RepetitionFinding[];
+  correctionMemory: CorrectionMemoryRule[];
+  generationSnapshots: GenerationSnapshot[];
+  completionAudit: MovieCompletionAudit;
+  audioPolicy: {
+    separateAudioAssetsAllowed: false;
+    generationOwner: 'Seedance video generation';
+    studioResponsibility: 'Scenario, exact dialogue, speaker binding, timing, sound instructions, and continuity only';
+  };
   assetLineage: Record<string, AssetLineage>;
   renderQueue: RenderQueueItem[];
   validations: ValidationReport[];
@@ -290,11 +303,13 @@ export const PIPELINE_STAGES = [
 ] as const;
 
 export const REFERENCE_PRIORITY_RULES = [
-  '1. The latest approved continuity checkpoint and previous approved ending frame have highest authority.',
-  '2. Approved permanently numbered asset references override descriptive prompt wording.',
-  '3. Approved World Bible and Film Bible rules override sequence improvisation.',
-  '4. The current sequence plan and exact dialogue govern performance inside those higher rules.',
-  '5. Provider defaults have lowest authority and may never override approved production state.',
+  '1. The latest explicit user instruction has highest authority and creates a scoped impact record when it changes approved work.',
+  '2. The approved current version of each permanently numbered visual asset controls identity and appearance.',
+  '3. The current approved continuity checkpoint and previous ending frame control inherited scene state.',
+  '4. The approved Film Bible controls filmmaking language and restrictions.',
+  '5. The approved World Bible controls geography, period, culture, materials, technology, and physical rules.',
+  '6. The approved script and structured sequence scenario control exact story action and dialogue.',
+  '7. AI inference and provider defaults have lowest authority and may never override approved production state.',
 ];
 
 const NEGATIVE_CONTINUITY_RULES = [
@@ -373,24 +388,27 @@ function expectedCounts(project: StudioProject, sequence: StudioSequence) {
 }
 
 function modelProfiles(project: StudioProject, previous?: ModelCapabilityProfile[]) {
-  if (previous?.length) return previous;
+  if (previous?.length) return previous.map((profile) => ({
+    ...profile,
+    generatedSoundInVideo: profile.generatedSoundInVideo ?? 'Unknown',
+  }));
   return [
     {
       id: 'video-adapter-unconfigured', provider: project.settings.videoProvider, model: 'Provider model not selected', connectionStatus: 'Not connected' as const,
       maximumDurationSeconds: null, supportedDurations: [], supportedResolutions: [], referenceImageSupport: 'Unknown' as const,
-      maximumReferenceImages: null, audioSupport: 'Unknown' as const, promptCharacterLimit: null, imageToVideo: 'Unknown' as const,
+      maximumReferenceImages: null, generatedSoundInVideo: 'Unknown' as const, promptCharacterLimit: null, imageToVideo: 'Unknown' as const,
       limitationPolicy: 'Capability values must be loaded from the connected provider adapter before execution. Unknown limits block automatic submission but never discard the prepared job.',
     },
     {
       id: 'image-adapter-unconfigured', provider: project.settings.imageProvider, model: 'Provider model not selected', connectionStatus: 'Not connected' as const,
       maximumDurationSeconds: null, supportedDurations: [], supportedResolutions: [], referenceImageSupport: 'Unknown' as const,
-      maximumReferenceImages: null, audioSupport: 'Unknown' as const, promptCharacterLimit: null, imageToVideo: 'Unknown' as const,
+      maximumReferenceImages: null, generatedSoundInVideo: 'Unknown' as const, promptCharacterLimit: null, imageToVideo: 'Unknown' as const,
       limitationPolicy: 'The asset generation adapter must publish its reference, resolution, prompt, cost, and output limits before automatic execution.',
     },
   ];
 }
 
-function detectConflicts(project: StudioProject, sequence: StudioSequence, dialogue: DialogueLine[], profile: ModelCapabilityProfile): PromptConflict[] {
+function detectConflicts(project: StudioProject, sequence: StudioSequence, dialogue: DialogueLine[], profile: ModelCapabilityProfile, pkg?: SequenceReferencePackage, scenario?: SequenceScenario): PromptConflict[] {
   const conflicts: PromptConflict[] = [];
   const add = (type: PromptConflict['type'], severity: PromptConflict['severity'], message: string, resolution: string) => {
     conflicts.push({ id: `${sequence.id}:conflict:${type}:${conflicts.length + 1}`, type, severity, message, resolution, status: 'Open' });
@@ -403,7 +421,22 @@ function detectConflicts(project: StudioProject, sequence: StudioSequence, dialo
   if (/night/i.test(sequence.timeOfDay) && /\b(daylight|midday|sunny day)\b/i.test(sequence.prompt)) add('Day/Night', 'Blocking', 'Prompt language conflicts with the approved night state.', 'Remove daylight wording and inherit the approved environment lighting.');
   for (const line of dialogue) {
     if (!sequence.assetIds.includes(line.speakerAssetId)) add('Dialogue', 'Blocking', `Dialogue speaker Asset ${formatNumber(line.speakerAssetNumber)} is not in the sequence manifest.`, 'Add the approved speaker asset or move the line to a sequence containing that identity.');
+    if (!line.requiredVisualReferences.some((reference) => reference.role === 'Identity' && reference.assetNumber === line.speakerAssetNumber)) add('Dialogue', 'Blocking', `Dialogue ${line.dialogueId} has no exact approved identity binding for Asset ${formatNumber(line.speakerAssetNumber)}.`, 'Bind the line to the permanent character identity and current appearance references.');
+    if (line.endSecond > sequence.duration || line.startSecond < 0 || line.endSecond <= line.startSecond) add('Dialogue', 'Blocking', `Dialogue ${line.dialogueId} falls outside the ${sequence.duration}s sequence window.`, 'Redistribute dialogue, pauses, reactions, action, and camera timing without changing exact text.');
+    const costumeMissing = line.currentCostumeAssetNumbers.filter((number) => !sequence.assetNumbers.includes(number));
+    if (costumeMissing.length) add('Wardrobe', 'Blocking', `Dialogue speaker Asset ${formatNumber(line.speakerAssetNumber)} current costume Asset ${costumeMissing.map(formatNumber).join(', ')} is not in the sequence manifest.`, 'Add the approved current costume reference without creating another identity.');
   }
+  const orderedDialogue = [...dialogue].sort((a, b) => a.turnOrder - b.turnOrder);
+  orderedDialogue.slice(1).forEach((line, index) => {
+    const previousLine = orderedDialogue[index];
+    if (line.startSecond < previousLine.endSecond && !['Overlap', 'Interruption'].includes(line.turnType)) add('Dialogue', 'Blocking', `Dialogue turns ${previousLine.turnOrder} and ${line.turnOrder} overlap without an authored overlap or interruption.`, 'Preserve exact turn order and assign explicit pause, interruption, response, or overlap timing.');
+  });
+  if (!sequence.assetManifest.locations.length && !sequence.assetManifest.interiors.length) add('Location', 'Blocking', 'No approved numbered location or interior reference is bound to the scenario.', 'Bind the exact approved location/current interior before generation.');
+  if (!sequence.prompt.includes('[PROPS, HANDS, CONTAINMENT, VISIBILITY]')) add('Continuity', 'Blocking', 'The compiled prompt is missing object visibility, containment, and hand continuity.', 'Recompile from structured production state.');
+  if (!sequence.prompt.includes('[CAMERA]') || !sequence.prompt.includes('[OPENING FRAME]') || !sequence.prompt.includes('[ENDING FRAME]')) add('Camera', 'Blocking', 'The prompt is missing camera handoff or frame expectations.', 'Recompile camera position, height, direction, distance, movement, lens, framing, opening, and ending sections.');
+  if (scenario && scenario.actions.some((action) => !action.actorAssetId || !action.actorAssetNumber)) add('Continuity', 'Blocking', 'One or more actions have no permanent numbered owner.', 'Assign every action to the exact character, creature, animal, vehicle, or object that performs it.');
+  if (scenario?.actions.some((action) => action.targetAssetId && action.hand === 'Unspecified')) add('Continuity', 'Blocking', 'An action uses a carried or handled object without an exact left, right, or both-hand assignment.', 'Set the hand in the structured action before generation.');
+  if (pkg?.rankedReferences.some((reference) => reference.required && !reference.included)) add('Model capability', 'Blocking', 'The provider reference limit excludes at least one required identity, current appearance, location, prop, or continuity frame.', 'Use a provider/reference strategy that retains every required binding or revise the scenario explicitly.');
   const pending = sequence.assetIds.filter((id) => project.assets.find((asset) => asset.id === id)?.lockState !== 'Locked');
   if (pending.length) add('Asset', 'Blocking', `${pending.length} required numbered asset reference${pending.length === 1 ? ' is' : 's are'} not locked.`, 'Approve the exact assets before generation.');
   if (profile.connectionStatus !== 'Connected') add('Model capability', 'Review', 'No video provider capability profile is connected.', 'Keep the job in Waiting and load adapter limits before submission.');
@@ -416,10 +449,11 @@ function latestCheckpoint(system: ProductionSystem | undefined, sequenceNumber: 
   return system?.checkpoints.filter((checkpoint) => checkpoint.sequenceNumber === sequenceNumber).sort((a, b) => b.sequenceRevision - a.sequenceRevision)[0];
 }
 
-function referencePackage(project: StudioProject, sequence: StudioSequence, dialogue: DialogueLine[], previous?: ProductionSystem): SequenceReferencePackage {
+function referencePackage(project: StudioProject, sequence: StudioSequence, dialogue: DialogueLine[], profile: ModelCapabilityProfile, prompt: string, previous?: ProductionSystem): SequenceReferencePackage {
   const checkpoint = latestCheckpoint(previous, sequence.number - 1);
-  const audioReferenceIds = dialogue.flatMap((line) => previous?.voiceIdentities[line.speakerAssetId]?.referenceAttachmentIds ?? []);
   const negativeConstraints = [...NEGATIVE_CONTINUITY_RULES, ...project.filmBible.negativeRules];
+  const rankedReferences = rankSequenceReferences(project, sequence, dialogue, checkpoint?.lastFrameKey ?? null, profile.maximumReferenceImages);
+  const included = rankedReferences.filter((item) => item.included);
   return {
     packageId: `${sequence.id}:reference-package:v${sequence.version}`,
     sequenceNumber: sequence.number,
@@ -427,14 +461,50 @@ function referencePackage(project: StudioProject, sequence: StudioSequence, dial
     assetFiles: [...sequence.assetFiles],
     previousApprovedSequence: sequence.number > 1 ? `SEQUENCE_${formatNumber(sequence.number - 1)}` : null,
     previousEndingFrameKey: checkpoint?.lastFrameKey ?? null,
-    prompt: sequence.prompt,
+    prompt,
     dialogue,
-    audioReferenceIds: Array.from(new Set(audioReferenceIds)),
+    rankedReferences,
+    excludedReferenceIds: rankedReferences.filter((item) => !item.included).map((item) => item.id),
+    providerReferenceLimit: profile.maximumReferenceImages,
     continuityInstruction: checkpoint?.openingExpectationForNextSequence ?? sequence.continuitySource,
     negativeConstraints,
     priorityRules: REFERENCE_PRIORITY_RULES,
-    uploadInstruction: `Attach exactly ${sequence.assetFiles.map((file, index) => `Asset ${formatNumber(sequence.assetNumbers[index])} (${file})`).join(', ')}${checkpoint?.lastFrameKey ? ` and previous approved ending frame ${checkpoint.lastFrameKey}` : ''}. Do not attach or introduce any unlisted recurring production reference.`,
+    uploadInstruction: `Attach in this exact order: ${included.map((item) => `${item.uploadOrder}. ${item.assetNumber ? `Asset ${formatNumber(item.assetNumber)} ` : ''}(${item.fileName})`).join(', ')}. Do not attach or introduce any unlisted recurring production reference.${rankedReferences.some((item) => !item.included) ? ` Provider limit excluded ${rankedReferences.filter((item) => !item.included).map((item) => item.assetNumber ? `Asset ${formatNumber(item.assetNumber)}` : item.fileName).join(', ')} by production priority.` : ''}`,
     freshness: sequence.number === 1 || !!checkpoint?.lastFrameKey ? 'Ready' : 'Missing Reference',
+  };
+}
+
+function sequenceReadiness(project: StudioProject, sequence: StudioSequence, scenario: SequenceScenario, pkg: SequenceReferencePackage, conflicts: PromptConflict[], profile: ModelCapabilityProfile): SequenceReadinessChecklist {
+  const blockers: string[] = [];
+  const scenarioComplete = !!scenario.purpose && !!scenario.openingSituation && !!scenario.endingSituation && scenario.actions.every((action) => !!action.actorAssetId);
+  const dialogueTimed = scenario.dialogue.every((line) => line.startSecond >= 0 && line.endSecond <= sequence.duration && line.endSecond > line.startSecond);
+  const speakersBound = scenario.dialogue.every((line) => line.requiredVisualReferences.some((reference) => reference.role === 'Identity' && reference.assetNumber === line.speakerAssetNumber));
+  const visualReferencesApproved = sequence.assetIds.every((id) => project.assets.find((asset) => asset.id === id)?.lockState === 'Locked');
+  const currentCostumesBound = scenario.dialogue.every((line) => line.currentCostumeAssetNumbers.every((number) => pkg.rankedReferences.some((reference) => reference.assetNumber === number && reference.included)));
+  const locationBound = sequence.assetManifest.locations.concat(sequence.assetManifest.interiors, sequence.assetManifest.environments).every((id) => pkg.rankedReferences.some((reference) => reference.assetId === id));
+  const criticalProps = project.assets.filter((asset) => sequence.assetIds.includes(asset.id) && ['Story critical', 'Recurring'].includes(asset.importance) && !['Characters', 'Costumes', 'Locations', 'Interiors', 'Environment States'].includes(asset.category));
+  const criticalPropsBound = criticalProps.every((asset) => pkg.rankedReferences.some((reference) => reference.assetId === asset.id && reference.included));
+  const previousContinuityReady = sequence.number === 1 || pkg.rankedReferences.some((reference) => reference.role === 'Previous continuity' && reference.included);
+  const providerReferenceLimitKnown = profile.maximumReferenceImages !== null;
+  const referenceCountSupported = profile.maximumReferenceImages !== null && pkg.rankedReferences.filter((reference) => reference.included).length <= profile.maximumReferenceImages && pkg.rankedReferences.filter((reference) => !reference.included && reference.required).length === 0;
+  const contradictionsClear = !conflicts.some((conflict) => conflict.severity === 'Blocking' && conflict.status === 'Open');
+  const promptCompiled = !!pkg.prompt && pkg.prompt.includes('[DIALOGUE BINDINGS]') && pkg.prompt.includes('[SEEDANCE SOUND INSTRUCTIONS');
+  if (!scenarioComplete) blockers.push('Structured scenario is incomplete.');
+  if (!dialogueTimed) blockers.push('Dialogue does not fit the sequence timing window.');
+  if (!speakersBound) blockers.push('Every dialogue line needs one approved numbered speaker identity.');
+  if (!visualReferencesApproved) blockers.push('One or more required visual references are not approved and locked.');
+  if (!currentCostumesBound) blockers.push('A dialogue speaker current costume is missing from the reference package.');
+  if (!locationBound) blockers.push('The approved location/environment binding is incomplete.');
+  if (!criticalPropsBound) blockers.push('A critical prop reference was removed by the provider limit.');
+  if (!previousContinuityReady) blockers.push('The previous approved continuity frame is missing.');
+  if (!providerReferenceLimitKnown) blockers.push('The selected provider reference limit is unknown.');
+  if (providerReferenceLimitKnown && !referenceCountSupported) blockers.push('The provider limit cannot include every required reference.');
+  if (!contradictionsClear) blockers.push('Blocking prompt contradictions remain open.');
+  if (!promptCompiled) blockers.push('The Seedance prompt has not been compiled from structured production state.');
+  return {
+    scenarioComplete, dialogueTimed, speakersBound, visualReferencesApproved, currentCostumesBound, locationBound, criticalPropsBound,
+    previousContinuityReady, providerReferenceLimitKnown, referenceCountSupported, contradictionsClear, promptCompiled,
+    readyForGeneration: blockers.length === 0, blockers,
   };
 }
 
@@ -480,7 +550,7 @@ function dependencyGraph(project: StudioProject, previous?: ProductionSystem): D
 function readiness(project: StudioProject, system: ProductionSystem): { status: ProductionReadiness; action: string; stage: string } {
   if (project.story.status !== 'Approved') return { status: 'Story Ready', action: 'Review and approve the story to freeze the narrative baseline.', stage: 'STORY' };
   if (project.worldBible.status !== 'Approved') return { status: 'Story Ready', action: 'Approve the World Bible so every asset and location inherits one physical world.', stage: 'WORLD BIBLE' };
-  if (project.filmBible.status !== 'Approved') return { status: 'Story Ready', action: 'Approve the Film Bible to lock visual, audio, and continuity rules.', stage: 'FILM BIBLE' };
+  if (project.filmBible.status !== 'Approved') return { status: 'Story Ready', action: 'Approve the Film Bible to lock visual, Seedance sound-instruction, and continuity rules.', stage: 'FILM BIBLE' };
   const unreadyAssets = project.assets.filter((asset) => asset.lockState !== 'Locked');
   if (unreadyAssets.length) return { status: 'Assets Incomplete', action: `Review ${unreadyAssets.length} remaining production asset${unreadyAssets.length === 1 ? '' : 's'}; start with Asset ${formatNumber(unreadyAssets[0].projectNumber)}.`, stage: 'ASSET APPROVAL' };
   if (system.dependencies.some((item) => ['Needs Review', 'Outdated', 'Missing Reference'].includes(item.freshness))) return { status: 'Assets Ready', action: 'Resolve dependency impacts before preparing the next reference package.', stage: 'CONTINUITY STATE' };
@@ -522,18 +592,23 @@ export function initializeProductionSystem(project: StudioProject): ProductionSy
   const selectedCapabilityProfileId = previous?.selectedCapabilityProfileId && capabilities.some((profile) => profile.id === previous.selectedCapabilityProfileId)
     ? previous.selectedCapabilityProfileId : capabilities[0].id;
   const profile = capabilities.find((item) => item.id === selectedCapabilityProfileId) ?? capabilities[0];
+  const characterStates = buildCharacterStates(project, previous?.characterStates);
+  const storyThreads = buildStoryThreads(project, previous?.storyThreads);
+  const correctionMemory = previous?.correctionMemory ?? [];
   const sequencePlans: Record<string, SequenceProductionPlan> = {};
   for (const sequence of project.sequences) {
     const old = previous?.sequencePlans?.[sequence.id];
-    const dialogue = old?.dialogue ?? [];
-    const pkg = referencePackage(project, sequence, dialogue, previous);
-    const conflicts = detectConflicts(project, sequence, dialogue, profile);
+    const dialogue = normalizeDialogueLines(project, sequence, old?.dialogue ?? []);
+    const scenario = buildSequenceScenario(project, sequence, dialogue, old?.scenario, characterStates);
+    const draftPackage = referencePackage(project, sequence, dialogue, profile, '', previous);
+    const compiledPrompt = compileSeedancePrompt(project, sequence, scenario, draftPackage.rankedReferences, [...NEGATIVE_CONTINUITY_RULES, ...project.filmBible.negativeRules], correctionMemory);
+    sequence.prompt = compiledPrompt;
+    const pkg = referencePackage(project, sequence, dialogue, profile, compiledPrompt, previous);
+    const conflicts = detectConflicts(project, sequence, dialogue, profile, pkg, scenario);
     const blocking = conflicts.some((conflict) => conflict.severity === 'Blocking' && conflict.status === 'Open');
     const referenceReady = pkg.freshness === 'Ready' || sequence.number === 1;
     sequencePlans[sequence.id] = {
-      sequenceId: sequence.id, sequenceNumber: sequence.number, timing: timingPlan(sequence), shots: shotPlan(project, sequence), dialogue,
-      dialoguePath: old?.dialoguePath ?? 'Silent',
-      shotAudioInstruction: old?.shotAudioInstruction ?? 'Use production ambience and purposeful silence. Generate no spoken words until exact dialogue and voice ownership are authored.',
+      sequenceId: sequence.id, sequenceNumber: sequence.number, timing: timingPlan(sequence), shots: shotPlan(project, sequence), scenario, dialogue, compiledPrompt,
       referencePackage: pkg, conflicts, negativeContinuityRules: [...NEGATIVE_CONTINUITY_RULES], expectedCounts: expectedCounts(project, sequence),
       backgroundPopulationRule: old?.backgroundPopulationRule ?? 'Zero unplanned background people, animals, creatures, vehicles, props, weapons, or structures. Only the exact manifest may appear.',
       entryExit: old?.entryExit ?? { entry: sequence.number === 1 ? 'Story-defined entrance into the established world' : `Enter from the approved exit and screen side of SEQUENCE_${formatNumber(sequence.number - 1)}`, exit: sequence.number === project.sequenceCount ? 'Hold final story position' : `Exit or settle toward SEQUENCE_${formatNumber(sequence.number + 1)}`, travel: sequence.number === 1 ? 'Opening geography establishes the route' : 'Travel must follow approved connected locations and elapsed story time' },
@@ -544,8 +619,11 @@ export function initializeProductionSystem(project: StudioProject): ProductionSy
       readiness: blocking ? 'Needs Review' : referenceReady ? 'Ready' : 'Missing Reference',
       expectedOpeningFrame: old?.expectedOpeningFrame ?? pkg.continuityInstruction, actualOpeningFrame: old?.actualOpeningFrame ?? null,
       lastFrameKey: old?.lastFrameKey ?? null, checkpointIds: old?.checkpointIds ?? [],
+      readinessChecklist: sequenceReadiness(project, sequence, scenario, pkg, conflicts, profile),
     };
   }
+  const scenarios = Object.fromEntries(Object.entries(sequencePlans).map(([id, plan]) => [id, plan.scenario]));
+  const repetitionFindings = detectProductionRepetition(scenarios);
   const assetLineage = Object.fromEntries(project.assets.map((asset) => [asset.id, lineage(project, asset, previous?.assetLineage?.[asset.id])]));
   const renderQueue = previous?.renderQueue ?? [];
   const estimatedCredits = renderQueue.reduce((sum, item) => sum + item.estimatedCredits, 0);
@@ -557,18 +635,22 @@ export function initializeProductionSystem(project: StudioProject): ProductionSy
   };
   const finalAssembly: FinalAssemblyPlan = previous?.finalAssembly ?? {
     id: uid('assembly'), version: 1, status: 'Blocked', orderedSequenceNumbers: project.sequences.map((sequence) => sequence.number),
-    transitionPlan: project.sequences.slice(1).map((sequence) => `Match the approved last frame and audio tail into Sequence ${sequence.number}.`),
-    audioPlan: ['Normalize dialogue intelligibility without changing voice identity.', 'Bridge approved ambience; preserve intentional silence and authored transitions.'],
+    transitionPlan: project.sequences.slice(1).map((sequence) => `Match the approved last frame and authored sound-continuity instruction into Sequence ${sequence.number}.`),
+    soundContinuityPlan: ['Seedance generates spoken dialogue, ambience, effects, requested music, and silence inside each video.', 'Match authored sound sources and intentional silence at every approved sequence boundary; do not create or export separate sound assets.'],
     colorPlan: ['Match exposure, white balance, palette, and time-of-day across every approved boundary.'],
     stabilizationPlan: ['Apply stabilization only where it does not alter approved framing, scale, or motion intention.'], creditsPlan: 'Append approved project credits after the final story frame.',
     missingSequenceNumbers: project.sequences.filter((sequence) => sequence.status !== 'Approved').map((sequence) => sequence.number), createdAt: project.updatedAt,
   };
+  finalAssembly.soundContinuityPlan ??= ['Seedance generates requested sound inside each video; Continuity Studio exports instructions and continuity state only.'];
   finalAssembly.missingSequenceNumbers = project.sequences.filter((sequence) => sequence.status !== 'Approved').map((sequence) => sequence.number);
   finalAssembly.status = finalAssembly.missingSequenceNumbers.length ? 'Blocked' : finalAssembly.status === 'Approved' ? 'Approved' : 'Ready';
   const system: ProductionSystem = {
-    schemaVersion: 1, pipelineStages: [...PIPELINE_STAGES], currentPipelineStage: 'STORY', readiness: 'Story Ready', nextLogicalAction: '',
+    schemaVersion: 2, pipelineStages: [...PIPELINE_STAGES], currentPipelineStage: 'STORY', readiness: 'Story Ready', nextLogicalAction: '',
     storyLock: previous?.storyLock ?? { status: 'Unlocked', lockedAt: null, reason: 'Story remains editable until production begins.' },
-    dependencies: dependencyGraph(project, previous), sequencePlans, voiceIdentities: previous?.voiceIdentities ?? {}, assetLineage,
+    dependencies: dependencyGraph(project, previous), sequencePlans, characterStates, storyThreads, repetitionFindings, correctionMemory,
+    generationSnapshots: previous?.generationSnapshots ?? [], completionAudit: buildMovieCompletionAudit(project, scenarios, repetitionFindings, storyThreads),
+    audioPolicy: { separateAudioAssetsAllowed: false, generationOwner: 'Seedance video generation', studioResponsibility: 'Scenario, exact dialogue, speaker binding, timing, sound instructions, and continuity only' },
+    assetLineage,
     renderQueue, validations: previous?.validations ?? [], corrections: previous?.corrections ?? [], checkpoints: previous?.checkpoints ?? [],
     modelCapabilities: capabilities, selectedCapabilityProfileId, costLedger, finalAssembly,
     finalQuality: qualityReport(project, previous?.finalQuality),
@@ -616,7 +698,7 @@ export function markDependencyChange(project: StudioProject, sourceId: string, r
         status: 'Failed',
         expected: 'Generated output matches the latest approved upstream production state',
         actual: reason,
-        correction: `Revalidate only the visual, audio, timing, prompt, and continuity consequences of ${sourceId}; preserve every unaffected approved field.`,
+        correction: `Revalidate only the visual, dialogue ownership, Seedance sound instructions, timing, prompt, and continuity consequences of ${sourceId}; preserve every unaffected approved field.`,
       };
       const existingCheck = validation.checks.findIndex((check) => check.id === checkId);
       if (existingCheck >= 0) validation.checks[existingCheck] = dependencyCheck;
@@ -652,21 +734,19 @@ export function resolveDependencyTarget(project: StudioProject, targetId: string
 export function addDialogueLine(project: StudioProject, sequence: StudioSequence, speaker: StudioAsset, exactDialogue: string) {
   project.production ??= initializeProductionSystem(project);
   const plan = project.production.sequencePlans[sequence.id];
-  const line: DialogueLine = {
-    id: uid('dialogue'), speakerAssetId: speaker.id, speakerAssetNumber: speaker.projectNumber, exactDialogue,
-    language: project.dialogueLanguage, accent: 'Character-defined; lock before voice generation', emotion: 'Story-appropriate controlled performance',
-    startSecond: Number((sequence.duration * 0.27).toFixed(2)), endSecond: Number((sequence.duration * 0.43).toFixed(2)),
-    physicalAction: 'Maintain the authored blocking, eyeline, held objects, and emotional state while speaking.',
-  };
+  if (speaker.category !== 'Characters') throw new Error(`Asset ${formatNumber(speaker.projectNumber)} is not a character identity and cannot own dialogue.`);
+  const line = createDialogueLine(project, sequence, speaker, exactDialogue, plan.dialogue);
   plan.dialogue.push(line);
-  plan.dialoguePath = 'Voice first';
-  plan.shotAudioInstruction = `Asset ${formatNumber(speaker.projectNumber)} owns the exact line “${exactDialogue}”. Generate the locked voice first, then use lip-synced audio or a model with verified direct-dialogue support.`;
-  project.production.voiceIdentities[speaker.id] ??= {
-    characterAssetId: speaker.id, characterAssetNumber: speaker.projectNumber, identityLabel: `${speaker.name} voice identity`,
-    language: project.dialogueLanguage, accent: 'Pending approval', vocalAge: 'Match approved character identity', timbre: 'Pending locked voice reference',
-    pace: 'Performance-defined', emotionalRange: 'Controlled by sequence dialogue metadata', referenceAttachmentIds: [], approvalStatus: 'Pending',
-  };
-  return refreshProductionSystem(project);
+  sequence.version += 1;
+  sequence.status = 'Needs Review';
+  plan.revision = sequence.version;
+  plan.revisions.push({ revision: plan.revision, label: `V${String(plan.revision).padStart(2, '0')}`, status: 'Needs Review', createdAt: nowIso(), reason: `Exact dialogue ${line.dialogueId} added for Asset ${formatNumber(speaker.projectNumber)}.`, prompt: plan.compiledPrompt, assetNumbers: [...sequence.assetNumbers] });
+  plan.freshness = 'Needs Review';
+  refreshProductionSystem(project);
+  const refreshedPlan = project.production.sequencePlans[sequence.id];
+  const revision = refreshedPlan.revisions.findLast((item) => item.revision === refreshedPlan.revision);
+  if (revision) revision.prompt = refreshedPlan.compiledPrompt;
+  return project;
 }
 
 export function queueSequenceGeneration(project: StudioProject, sequence: StudioSequence) {
@@ -676,15 +756,23 @@ export function queueSequenceGeneration(project: StudioProject, sequence: Studio
   const existing = project.production.renderQueue.findLast((item) => item.sequenceNumber === sequence.number && !['Failed', 'Approved'].includes(item.status));
   if (existing) return existing;
   const at = nowIso();
-  const blocking = plan.conflicts.some((conflict) => conflict.severity === 'Blocking' && conflict.status === 'Open') || ['Outdated', 'Needs Review', 'Missing Reference'].includes(plan.freshness);
+  const blocking = !plan.readinessChecklist.readyForGeneration || plan.conflicts.some((conflict) => conflict.severity === 'Blocking' && conflict.status === 'Open') || ['Outdated', 'Needs Review', 'Missing Reference'].includes(plan.freshness);
+  const snapshot: GenerationSnapshot = {
+    id: uid('generation_snapshot'), sequenceNumber: sequence.number, createdAt: at,
+    scenario: structuredClone(plan.scenario), dialogue: structuredClone(plan.dialogue), referencePackageId: plan.referencePackage.packageId,
+    selectedReferenceIds: plan.referencePackage.rankedReferences.filter((reference) => reference.included).map((reference) => reference.id),
+    compiledPrompt: plan.compiledPrompt, correctionRuleIds: project.production.correctionMemory.filter((rule) => rule.active && (rule.sequenceNumber === null || rule.sequenceNumber === sequence.number)).map((rule) => rule.id),
+    reason: project.production.generationSnapshots.some((item) => item.sequenceNumber === sequence.number) ? 'Regeneration' : 'Initial generation', immutable: true,
+  };
+  project.production.generationSnapshots.push(snapshot);
   const job: RenderQueueItem = {
     id: uid('render'), targetId: sequence.id, sequenceNumber: sequence.number,
     status: blocking || profile.connectionStatus !== 'Connected' ? 'Waiting' : 'Preparing', provider: profile.provider, model: profile.model,
     durationSeconds: sequence.duration, resolution: project.resolution, generationCount: 1, estimatedCredits: 1,
-    estimatedCostUsd: null, actualCostUsd: null, prompt: sequence.prompt, referencePackageId: plan.referencePackage.packageId,
+    estimatedCostUsd: null, actualCostUsd: null, prompt: plan.compiledPrompt, referencePackageId: plan.referencePackage.packageId, generationSnapshotId: snapshot.id,
     assetNumbers: [...sequence.assetNumbers], continuityState: plan.referencePackage.continuityInstruction,
-    failureMessage: blocking ? 'Blocked by unresolved prompt or dependency conflicts.' : profile.connectionStatus !== 'Connected' ? 'Video provider capability profile is not connected.' : null,
-    retryHistory: [], createdAt: at, updatedAt: at,
+    failureMessage: blocking ? plan.readinessChecklist.blockers.join(' ') || 'Blocked by unresolved prompt or dependency conflicts.' : profile.connectionStatus !== 'Connected' ? 'Video provider capability profile is not connected.' : null,
+    retryHistory: [], resultMediaKey: null, continuityFrameKey: null, createdAt: at, updatedAt: at,
   };
   project.production.renderQueue.push(job);
   project.production.storyLock = { status: 'Locked', lockedAt: project.production.storyLock.lockedAt ?? at, reason: 'Production started; story changes now create dependency impacts instead of overwriting approved work.' };
@@ -705,6 +793,45 @@ export function retryRenderJob(project: StudioProject, job: RenderQueueItem) {
   return job;
 }
 
+export function registerGeneratedSequenceResult(project: StudioProject, sequence: StudioSequence, attachmentId: string) {
+  project.production ??= initializeProductionSystem(project);
+  const plan = project.production.sequencePlans[sequence.id];
+  const job = project.production.renderQueue.findLast((item) => item.sequenceNumber === sequence.number);
+  if (!job) throw new Error(`${sequence.id} has no generation job to receive a result.`);
+  const mediaKey = `reference:${attachmentId}`;
+  job.status = 'Completed';
+  job.resultMediaKey = mediaKey;
+  job.continuityFrameKey = `${mediaKey}#last-frame`;
+  job.failureMessage = null;
+  job.updatedAt = nowIso();
+  plan.actualOpeningFrame = `${mediaKey}#first-frame`;
+  plan.lastFrameKey = job.continuityFrameKey;
+  sequence.status = 'Generated';
+  refreshProductionSystem(project);
+  return job;
+}
+
+export function rememberCorrection(project: StudioProject, instruction: string, sequenceNumber: number | null) {
+  project.production ??= initializeProductionSystem(project);
+  const rule: CorrectionMemoryRule = {
+    id: uid('correction_memory'), instruction, appliesTo: ['Scenario', 'Reference package', 'Seedance prompt', 'Validation'],
+    sequenceNumber, createdAt: nowIso(), active: true,
+  };
+  project.production.correctionMemory.push(rule);
+  refreshProductionSystem(project);
+  return rule;
+}
+
+export function setSelectedModelReferenceLimit(project: StudioProject, maximumReferenceImages: number) {
+  project.production ??= initializeProductionSystem(project);
+  const profile = project.production.modelCapabilities.find((item) => item.id === project.production.selectedCapabilityProfileId);
+  if (!profile) throw new Error('No selected video capability profile exists.');
+  profile.maximumReferenceImages = Math.max(1, Math.trunc(maximumReferenceImages));
+  profile.referenceImageSupport = 'Supported';
+  refreshProductionSystem(project);
+  return profile;
+}
+
 export function validateSequence(project: StudioProject, sequence: StudioSequence) {
   project.production ??= initializeProductionSystem(project);
   const plan = project.production.sequencePlans[sequence.id];
@@ -714,7 +841,7 @@ export function validateSequence(project: StudioProject, sequence: StudioSequenc
     { id: uid('check'), name: 'Opening frame match', status: mediaAvailable ? 'Needs Review' : 'Failed', expected: plan.expectedOpeningFrame, actual: mediaAvailable ? plan.actualOpeningFrame ?? 'Awaiting visual comparison annotation' : 'No generated video or opening frame is stored', correction: 'Compare the generated first frame against the prior approved checkpoint and correct only mismatched state.' },
     { id: uid('check'), name: 'Exact people and asset counts', status: mediaAvailable ? 'Needs Review' : 'Failed', expected: JSON.stringify(plan.expectedCounts), actual: mediaAvailable ? 'Awaiting image/video validation annotation' : 'No media available', correction: 'Remove duplicates and unplanned elements; preserve exact named counts and permanent asset identities.' },
     { id: uid('check'), name: 'Wardrobe, props, damage, and object permanence', status: mediaAvailable ? 'Needs Review' : 'Failed', expected: plan.referencePackage.continuityInstruction, actual: mediaAvailable ? 'Awaiting frame comparison' : 'No media available', correction: 'Correct only the failed continuity fields using approved numbered references.' },
-    { id: uid('check'), name: 'Dialogue, voice, and lip synchronization', status: plan.dialoguePath === 'Silent' ? 'Passed' : mediaAvailable ? 'Needs Review' : 'Failed', expected: plan.dialogue.length ? `${plan.dialogue.length} exact authored line(s), owned by numbered speakers` : 'Silent sequence', actual: plan.dialoguePath === 'Silent' ? 'No dialogue requested' : mediaAvailable ? 'Awaiting audio/video validation' : 'No media available', correction: 'Regenerate or replace only the audio/lip-sync path while preserving approved picture when possible.' },
+    { id: uid('check'), name: 'Exact dialogue ownership and in-video sound result', status: plan.dialogue.length === 0 ? 'Passed' : mediaAvailable ? 'Needs Review' : 'Failed', expected: plan.dialogue.length ? `${plan.dialogue.length} exact timed line(s), each owned by one numbered speaker and generated by Seedance inside the video` : 'No spoken dialogue requested', actual: plan.dialogue.length === 0 ? 'No spoken dialogue requested' : mediaAvailable ? 'Awaiting result inspection when dialogue is audible and inspectable' : 'No media available', correction: 'Correct the Seedance scenario or exact speaker binding while preserving every approved visual state and story beat.' },
     { id: uid('check'), name: 'Ending checkpoint and extractable last frame', status: mediaAvailable ? 'Needs Review' : 'Failed', expected: sequence.closingState, actual: mediaAvailable ? plan.lastFrameKey ?? 'Last frame extraction pending' : 'No generated ending frame', correction: 'Correct the ending position/state and extract the actual last frame for the next reference package.' },
   ];
   const report: ValidationReport = {
@@ -748,6 +875,22 @@ export function approveSequenceAndCheckpoint(project: StudioProject, sequence: S
   };
   project.production.checkpoints.push(checkpoint);
   plan.checkpointIds.push(checkpoint.id);
+  for (const characterId of sequence.assetManifest.characters) {
+    const state = project.production.characterStates[characterId];
+    if (!state) continue;
+    state.entranceHistory.push({ sequenceNumber: sequence.number, state: plan.entryExit.entry });
+    state.exitHistory.push({ sequenceNumber: sequence.number, state: plan.entryExit.exit });
+    state.currentPosition = sequence.endingState.characterPositions[characterId] ?? sequence.sceneState.locationId;
+    state.screenDirection = sequence.endingState.characterDirections[characterId] ?? sequence.endingState.screenDirection;
+    state.currentEmotion = sequence.endingState.characterConditions[characterId] ?? sequence.closingState;
+    state.currentMotivation = plan.scenario.activeStoryObjective;
+    state.emotionalProgression.push({ sequenceNumber: sequence.number, emotion: state.currentEmotion, cause: sequence.closingState });
+    state.motivationProgression.push({ sequenceNumber: sequence.number, motivation: state.currentMotivation, cause: plan.scenario.storyDevelopment });
+  }
+  for (const thread of project.production.storyThreads) {
+    if (thread.payoffSequence !== null && sequence.number >= thread.payoffSequence) thread.status = 'Paid off';
+    else if (sequence.number >= thread.introducedSequence) thread.status = 'Advanced';
+  }
   const following = project.sequences.find((item) => item.number === sequence.number + 1);
   if (following) {
     const followingPlan = project.production.sequencePlans[following.id];

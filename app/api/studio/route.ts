@@ -152,9 +152,11 @@ function intelligenceStatements(project: StudioProject) {
   for (const plan of Object.values(project.production.sequencePlans)) {
     statements.push(productionRecord('sequence-plan', plan.sequenceId, plan.readiness, plan.sequenceNumber, plan));
   }
-  for (const voice of Object.values(project.production.voiceIdentities)) {
-    statements.push(productionRecord('voice-identity', voice.characterAssetId, voice.approvalStatus, null, voice));
-  }
+  for (const character of Object.values(project.production.characterStates)) statements.push(productionRecord('character-production-state', character.assetId, 'Tracked', null, character));
+  for (const thread of project.production.storyThreads) statements.push(productionRecord('story-thread', thread.id, thread.status, thread.introducedSequence, thread));
+  for (const finding of project.production.repetitionFindings) statements.push(productionRecord('repetition-finding', finding.id, finding.severity, finding.sequenceNumbers[0] ?? null, finding));
+  for (const rule of project.production.correctionMemory) statements.push(productionRecord('correction-memory', rule.id, rule.active ? 'Active' : 'Inactive', rule.sequenceNumber, rule));
+  for (const snapshot of project.production.generationSnapshots) statements.push(productionRecord('generation-snapshot', snapshot.id, 'Immutable', snapshot.sequenceNumber, snapshot));
   for (const lineage of Object.values(project.production.assetLineage)) {
     statements.push(productionRecord('asset-lineage', lineage.assetId, lineage.approvedVersion ? 'Approved' : 'Draft', null, lineage));
   }
@@ -183,6 +185,8 @@ function intelligenceStatements(project: StudioProject) {
     productionRecord('cost-ledger', 'current', 'Tracked', null, project.production.costLedger),
     productionRecord('final-assembly', project.production.finalAssembly.id, project.production.finalAssembly.status, null, project.production.finalAssembly),
     productionRecord('final-quality', project.production.finalQuality.id, project.production.finalQuality.status, null, project.production.finalQuality),
+    productionRecord('movie-completion-audit', project.production.completionAudit.id, project.production.completionAudit.status, null, project.production.completionAudit),
+    productionRecord('audio-policy', 'single-policy', 'Enforced', null, project.production.audioPolicy),
     productionRecord('autosave', 'current', 'Enabled', null, project.production.autosave),
   );
   return statements;

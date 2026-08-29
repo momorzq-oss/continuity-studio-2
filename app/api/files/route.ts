@@ -25,7 +25,6 @@ function inferReferenceRoles(file: File, role: string) {
     }
   }
   if (file.type.startsWith('video/')) roles.add('Continuity');
-  if (file.type.startsWith('audio/')) roles.add('Sound');
   if (roles.size === 0) roles.add('Production reference');
   return [...roles];
 }
@@ -41,6 +40,9 @@ export async function POST(request: Request) {
     const file = form.get('file');
     if (!projectId || !(file instanceof File)) {
       return Response.json({ error: 'Choose a file and an active project first.' }, { status: 400 });
+    }
+    if (file.type.startsWith('audio/')) {
+      return Response.json({ error: 'Continuity Studio does not store separate sound assets. Write dialogue, ambience, effects, music, or silence as scenario instructions; Seedance generates them inside the video.' }, { status: 415 });
     }
     if (file.size > 250 * 1024 * 1024) {
       return Response.json({ error: 'That file is over the 250 MB reference limit.' }, { status: 413 });
