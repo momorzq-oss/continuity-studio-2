@@ -1,0 +1,153 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Continuity Studio Codex reasoning result",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "mode", "reasoningSummary", "canonicalCommand", "responseGuidance", "blueprint"],
+  "properties": {
+    "version": { "type": "integer", "const": 1 },
+    "mode": { "type": "string", "enum": ["project-blueprint", "command"] },
+    "reasoningSummary": { "type": "string", "minLength": 1, "maxLength": 1200 },
+    "canonicalCommand": {
+      "anyOf": [
+        { "type": "string", "minLength": 1, "maxLength": 500 },
+        { "type": "null" }
+      ]
+    },
+    "responseGuidance": { "type": "string", "maxLength": 1200 },
+    "blueprint": {
+      "anyOf": [
+        { "$ref": "#/$defs/movieBlueprint" },
+        { "type": "null" }
+      ]
+    }
+  },
+  "$defs": {
+    "stringList": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1, "maxLength": 500 },
+      "maxItems": 30
+    },
+    "story": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["logline", "protagonist", "conflict", "beginning", "escalation", "midpoint", "climax", "ending"],
+      "properties": {
+        "logline": { "type": "string", "minLength": 1, "maxLength": 1200 },
+        "protagonist": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "conflict": { "type": "string", "minLength": 1, "maxLength": 1200 },
+        "beginning": { "type": "string", "minLength": 1, "maxLength": 1600 },
+        "escalation": { "type": "string", "minLength": 1, "maxLength": 1600 },
+        "midpoint": { "type": "string", "minLength": 1, "maxLength": 1600 },
+        "climax": { "type": "string", "minLength": 1, "maxLength": 1600 },
+        "ending": { "type": "string", "minLength": 1, "maxLength": 1600 }
+      }
+    },
+    "worldBible": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["geography", "historicalPeriod", "culture", "technologyLevel", "architecture", "constructionMaterials", "interiorDesign", "furnitureStyle", "terrain", "climate", "vegetation", "transportation", "wardrobeRules", "objectRules", "weaponRules", "languageRules", "visualRules", "lightingRules", "environmentalRules", "physicalRules", "restrictions"],
+      "properties": {
+        "geography": { "type": "string", "minLength": 1, "maxLength": 800 },
+        "historicalPeriod": { "type": "string", "minLength": 1, "maxLength": 300 },
+        "culture": { "type": "string", "minLength": 1, "maxLength": 800 },
+        "technologyLevel": { "type": "string", "minLength": 1, "maxLength": 800 },
+        "architecture": { "$ref": "#/$defs/stringList" },
+        "constructionMaterials": { "$ref": "#/$defs/stringList" },
+        "interiorDesign": { "$ref": "#/$defs/stringList" },
+        "furnitureStyle": { "$ref": "#/$defs/stringList" },
+        "terrain": { "$ref": "#/$defs/stringList" },
+        "climate": { "$ref": "#/$defs/stringList" },
+        "vegetation": { "$ref": "#/$defs/stringList" },
+        "transportation": { "$ref": "#/$defs/stringList" },
+        "wardrobeRules": { "$ref": "#/$defs/stringList" },
+        "objectRules": { "$ref": "#/$defs/stringList" },
+        "weaponRules": { "$ref": "#/$defs/stringList" },
+        "languageRules": { "$ref": "#/$defs/stringList" },
+        "visualRules": { "$ref": "#/$defs/stringList" },
+        "lightingRules": { "$ref": "#/$defs/stringList" },
+        "environmentalRules": { "$ref": "#/$defs/stringList" },
+        "physicalRules": { "$ref": "#/$defs/stringList" },
+        "restrictions": { "$ref": "#/$defs/stringList" }
+      }
+    },
+    "filmBible": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["worldRules", "characterRules", "visualRules", "soundRules", "continuityRules", "negativeRules"],
+      "properties": {
+        "worldRules": { "$ref": "#/$defs/stringList" },
+        "characterRules": { "$ref": "#/$defs/stringList" },
+        "visualRules": { "$ref": "#/$defs/stringList" },
+        "soundRules": { "$ref": "#/$defs/stringList" },
+        "continuityRules": { "$ref": "#/$defs/stringList" },
+        "negativeRules": { "$ref": "#/$defs/stringList" }
+      }
+    },
+    "asset": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "category", "description", "storyPurpose", "sequences", "importance", "continuityConstraints"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1, "maxLength": 180 },
+        "category": {
+          "type": "string",
+          "enum": ["Characters", "Locations", "Interiors", "Environment States", "Furniture", "Props", "Story Critical Objects", "Costumes", "Creatures", "Animals", "Vehicles", "Weapons", "Mechanical Systems", "Transformation Sheets", "Damage Sheets", "Lighting", "Effects"]
+        },
+        "description": { "type": "string", "minLength": 1, "maxLength": 1600 },
+        "storyPurpose": { "type": "string", "minLength": 1, "maxLength": 800 },
+        "sequences": {
+          "type": "array",
+          "items": { "type": "integer", "minimum": 1, "maximum": 60 },
+          "minItems": 1,
+          "maxItems": 60
+        },
+        "importance": { "type": "string", "enum": ["Story critical", "Recurring", "Location anchor", "Background", "Incidental"] },
+        "continuityConstraints": { "$ref": "#/$defs/stringList" }
+      }
+    },
+    "sequence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["title", "purpose", "locationName", "timeOfDay", "assetNames", "openingState", "closingState"],
+      "properties": {
+        "title": { "type": "string", "minLength": 1, "maxLength": 180 },
+        "purpose": { "type": "string", "minLength": 1, "maxLength": 1800 },
+        "locationName": { "type": "string", "minLength": 1, "maxLength": 300 },
+        "timeOfDay": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "assetNames": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1, "maxLength": 180 },
+          "maxItems": 40
+        },
+        "openingState": { "type": "string", "minLength": 1, "maxLength": 1400 },
+        "closingState": { "type": "string", "minLength": 1, "maxLength": 1400 }
+      }
+    },
+    "movieBlueprint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["title", "durationSeconds", "genre", "subgenre", "setting", "region", "period", "dialogueLanguage", "visualStyle", "cameraStyle", "lensDirection", "lightingDirection", "colorDirection", "story", "worldBible", "filmBible", "assets", "sequences"],
+      "properties": {
+        "title": { "type": "string", "minLength": 1, "maxLength": 180 },
+        "durationSeconds": { "type": "integer", "minimum": 30, "maximum": 1800 },
+        "genre": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "subgenre": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "setting": { "type": "string", "minLength": 1, "maxLength": 1000 },
+        "region": { "type": "string", "minLength": 1, "maxLength": 300 },
+        "period": { "type": "string", "minLength": 1, "maxLength": 300 },
+        "dialogueLanguage": { "type": "string", "minLength": 1, "maxLength": 180 },
+        "visualStyle": { "type": "string", "minLength": 1, "maxLength": 800 },
+        "cameraStyle": { "type": "string", "minLength": 1, "maxLength": 800 },
+        "lensDirection": { "type": "string", "minLength": 1, "maxLength": 800 },
+        "lightingDirection": { "type": "string", "minLength": 1, "maxLength": 800 },
+        "colorDirection": { "type": "string", "minLength": 1, "maxLength": 800 },
+        "story": { "$ref": "#/$defs/story" },
+        "worldBible": { "$ref": "#/$defs/worldBible" },
+        "filmBible": { "$ref": "#/$defs/filmBible" },
+        "assets": { "type": "array", "items": { "$ref": "#/$defs/asset" }, "minItems": 2, "maxItems": 80 },
+        "sequences": { "type": "array", "items": { "$ref": "#/$defs/sequence" }, "minItems": 1, "maxItems": 60 }
+      }
+    }
+  }
+}

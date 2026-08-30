@@ -9,6 +9,7 @@ import {
   type StudioProject,
 } from '@/lib/studio';
 import { decodeProjectState, encodeProjectState } from '@/lib/project-state-codec';
+import { parseStudioBrainResult } from '@/lib/studio-brain';
 
 export const runtime = 'edge';
 
@@ -522,7 +523,7 @@ function initialAssistantMessage(project: StudioProject): StudioMessage {
     id: `message_${crypto.randomUUID()}`,
     role: 'assistant',
     createdAt: nowIso(),
-    content: `I shaped the first story draft for “${project.title}” from your idea. Read it here, copy or download it, or tell me what to change. Nothing has been generated, approved, or sent to an image or video provider. When the story feels right, choose how you want me to continue through the non-paid production preparation.`,
+    content: `${project.reasoning.source === 'Codex' ? 'Codex analyzed the complete idea and I shaped' : 'The deterministic fallback shaped'} the first story draft for “${project.title}”. Read it here, copy or download it, or tell me what to change. Nothing has been generated, approved, or sent to an image or video provider. When the story feels right, choose how you want me to continue through the non-paid production preparation.`,
     metadata: { kind: 'story' },
   };
 }
@@ -533,10 +534,11 @@ export async function GET(request: Request) {
     const url = new URL(request.url);
     const projectId = url.searchParams.get('projectId');
     const summaries = await listProjects();
-    if (!projectId) return json({ projects: summaries });
+    const capabilities = { imageGeneration: Boolean(getRuntimeEnv().OPENAI_API_KEY) };
+    if (!projectId) return json({ projects: summaries, capabilities });
     const project = await loadProject(projectId);
     if (!project) return json({ error: 'Project not found.' }, { status: 404 });
-    return json({ projects: summaries, project, messages: await loadMessages(projectId) });
+    return json({ projects: summaries, project, messages: await loadMessages(projectId), capabilities });
   } catch (error) {
     console.error(error);
     return json({ error: 'The studio could not open project memory. Please try again.' }, { status: 500 });
@@ -553,16 +555,19 @@ export async function POST(request: Request) {
       settings?: Partial<StudioProject['settings']>;
       expectedRevision?: number;
       attachmentId?: string;
+      brainResult?: unknown;
     };
+    const brainResult = parseStudioBrainResult(body.brainResult);
+    const imageGenerationAvailable = Boolean(getRuntimeEnv().OPENAI_API_KEY);
 
     if (!body.projectId) {
       const idea = body.message?.trim();
       if (!idea) return json({ error: 'Describe the movie you want to create.' }, { status: 400 });
-      const project = createProjectFromIdea(idea);
+      const project = createProjectFromIdea(idea, brainResult?.mode === 'project-blueprint' ? brainResult : null);
       const userMessage: StudioMessage = { id: `message_${crypto.randomUUID()}`, role: 'user', content: idea, createdAt: project.createdAt };
       const assistantMessage = initialAssistantMessage(project);
       await createProjectGraph(project, [userMessage, assistantMessage]);
-      return json({ project, messages: [userMessage, assistantMessage], projects: await listProjects() });
+      return json({ project, messages: [userMessage, assistantMessage], projects: await listProjects(), capabilities: { imageGeneration: imageGenerationAvailable } });
     }
 
     const project = await loadProject(body.projectId);
@@ -585,7 +590,8 @@ export async function POST(request: Request) {
     const content = body.message?.trim();
     if (!content) return json({ error: 'Write an instruction for the studio.' }, { status: 400 });
     const beforeProject = structuredClone(project);
-    if (/repair this project/i.test(content)) {
+    const engineInput = brainResult?.mode === 'command' && brainResult.canonicalCommand ? brainResult.canonicalCommand : content;
+    if (/repair this project/i.test(engineInput)) {
       const { DB, FILES } = getRuntimeEnv();
       const media = await DB.prepare('SELECT id, media_key FROM asset_references WHERE project_id = ?').bind(project.id).all<{ id: string; media_key: string }>();
       for (const item of media.results) {
@@ -594,13 +600,13 @@ export async function POST(request: Request) {
       }
     }
     const userMessage: StudioMessage = { id: `message_${crypto.randomUUID()}`, role: 'user', content, createdAt: nowIso() };
-    const rollback = await resolveRollback(project, content);
+    const rollback = await resolveRollback(project, engineInput);
     const result = rollback
       ? { project: rollback.project, response: { id: `message_${crypto.randomUUID()}`, role: 'assistant' as const, content: rollback.text, createdAt: nowIso(), metadata: { kind: 'control' as const } } }
-      : interpretStudioMessage(project, content, { preferredAttachmentId: body.attachmentId });
+      : interpretStudioMessage(project, engineInput, { preferredAttachmentId: body.attachmentId, imageGenerationAvailable, brainResult });
     const normalized = normalizeProject(result.project);
     await persistProject(normalized, [userMessage, result.response], expectedRevision, rollback ? 'rollback' : 'chat', content.slice(0, 240), beforeProject);
-    return json({ project: normalized, messages: [userMessage, result.response], projects: await listProjects(), sideEffect: 'sideEffect' in result ? result.sideEffect : undefined });
+    return json({ project: normalized, messages: [userMessage, result.response], projects: await listProjects(), sideEffect: 'sideEffect' in result ? result.sideEffect : undefined, capabilities: { imageGeneration: imageGenerationAvailable } });
   } catch (error) {
     console.error(error);
     if (error instanceof Error && /CHECK constraint failed|transaction_revision_must_match/i.test(error.message)) {

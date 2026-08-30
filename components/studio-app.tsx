@@ -43,6 +43,7 @@ import { Input } from '@/components/ui/input';
 import { Progress } from '@/components/ui/progress';
 import { Switch } from '@/components/ui/switch';
 import { getProductionDocument, type ProductionDocumentKind } from '@/lib/chat-documents';
+import { compactProjectForBrain, parseStudioBrainResult, type StudioBrainResult } from '@/lib/studio-brain';
 import { cn } from '@/lib/utils';
 import type { ProjectSummary, StudioAsset, StudioMessage, StudioProject, StudioSequence } from '@/lib/studio';
 
@@ -55,6 +56,34 @@ const primaryNavigation = [
 ];
 
 const assetFilters = ['All', 'Characters', 'Creatures', 'Animals', 'Locations', 'Interiors', 'Environment States', 'Vehicles', 'Props', 'Weapons', 'Costumes', 'Furniture', 'Mechanical Systems', 'Approved', 'Pending', 'Needs Review', 'Retired', 'Orphaned'];
+
+type RuntimeCapabilities = {
+  imageGeneration: boolean;
+  codexBrain: 'checking' | 'connected' | 'fallback';
+};
+
+async function askCodexBrain(project: StudioProject | null, message: string): Promise<StudioBrainResult | null> {
+  const controller = new AbortController();
+  const timer = window.setTimeout(() => controller.abort(), 245_000);
+  try {
+    const response = await fetch('http://127.0.0.1:4317/v1/reason', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        mode: project ? 'command' : 'project-blueprint',
+        message,
+        project: project ? compactProjectForBrain(project) : undefined,
+      }),
+      signal: controller.signal,
+    });
+    const data = await response.json() as { result?: unknown };
+    return response.ok ? parseStudioBrainResult(data.result) : null;
+  } catch {
+    return null;
+  } finally {
+    window.clearTimeout(timer);
+  }
+}
 
 function relativeTime(value: string) {
   const delta = Date.now() - new Date(value).getTime();
@@ -576,6 +605,7 @@ export function StudioApp() {
   const [search, setSearch] = useState('');
   const [assetFilter, setAssetFilter] = useState('All');
   const [lightMode, setLightMode] = useState(false);
+  const [capabilities, setCapabilities] = useState<RuntimeCapabilities>({ imageGeneration: false, codexBrain: 'checking' });
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const importInputRef = useRef<HTMLInputElement>(null);
@@ -661,7 +691,8 @@ export function StudioApp() {
     void (async () => {
       try {
         const response = await fetch('/api/studio', { cache: 'no-store' });
-        const data = await response.json() as { projects?: ProjectSummary[] };
+        const data = await response.json() as { projects?: ProjectSummary[]; capabilities?: { imageGeneration?: boolean } };
+        setCapabilities((current) => ({ ...current, imageGeneration: Boolean(data.capabilities?.imageGeneration) }));
         const initial = data.projects ?? [];
         setProjects(initial);
         if (initial[0]) await loadProject(initial[0].id);
@@ -672,6 +703,16 @@ export function StudioApp() {
       }
     })();
   }, [loadProject]);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => controller.abort(), 3000);
+    void fetch('http://127.0.0.1:4317/healthz', { cache: 'no-store', signal: controller.signal })
+      .then((response) => setCapabilities((current) => ({ ...current, codexBrain: response.ok ? 'connected' : 'fallback' })))
+      .catch(() => setCapabilities((current) => ({ ...current, codexBrain: 'fallback' })))
+      .finally(() => window.clearTimeout(timer));
+    return () => { controller.abort(); window.clearTimeout(timer); };
+  }, []);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
@@ -782,10 +823,13 @@ export function StudioApp() {
         ? await uploadFiles(project, selectedFiles, role)
         : null;
       const instructionProject = uploaded?.project ?? project;
+      const brainResult = await askCodexBrain(instructionProject, content || fallbackContent);
+      setCapabilities((current) => ({ ...current, codexBrain: brainResult ? 'connected' : 'fallback' }));
+      if (!brainResult) setNotice('Codex brain was unavailable for this instruction. The validated deterministic fallback is handling it; no generation boundary is bypassed.');
       const response = await fetch('/api/studio', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ projectId: instructionProject?.id, expectedRevision: instructionProject?.storageRevision, message: content || fallbackContent, attachmentId: uploaded?.lastAttachmentId }),
+        body: JSON.stringify({ projectId: instructionProject?.id, expectedRevision: instructionProject?.storageRevision, message: content || fallbackContent, attachmentId: uploaded?.lastAttachmentId, brainResult }),
       });
       const data = await response.json() as { project?: StudioProject; messages?: StudioMessage[]; projects?: ProjectSummary[]; error?: string; sideEffect?: string };
       if (!response.ok || !data.project) throw new Error(data.error || 'The instruction could not be applied.');
@@ -803,6 +847,24 @@ export function StudioApp() {
       setProjects(data.projects ?? projects);
       setDraft('');
       setFiles([]);
+      if (data.sideEffect === 'image-generation') {
+        const assetId = finalMessages.findLast((item) => item.metadata?.kind === 'asset-generation')?.metadata?.assetIds?.[0];
+        if (assetId) {
+          const generationResponse = await fetch('/api/image-generation', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ projectId: finalProject.id, expectedRevision: finalProject.storageRevision, assetId }),
+          });
+          const generated = await generationResponse.json() as { project?: StudioProject; message?: StudioMessage; error?: string };
+          if (generationResponse.ok && generated.project) {
+            finalProject = generated.project;
+            if (generated.message) finalMessages = [...finalMessages, generated.message];
+            setProject(finalProject);
+            setMessages((current) => project ? [...current, ...(generated.message ? [generated.message] : [])] : finalMessages);
+          } else {
+            setError(generated.error || 'The image provider did not complete the requested sheet. The prepared brief and all references remain safe.');
+          }
+        }
+      }
       if (data.sideEffect === 'export') window.setTimeout(() => downloadExport(finalProject.id), 300);
       if (data.sideEffect === 'asset-export') window.setTimeout(() => void downloadAssets(finalProject.id), 300);
     } catch (cause) {
@@ -947,7 +1009,7 @@ export function StudioApp() {
         ) : view === 'advanced' ? (
           <AdvancedControlView project={project} working={working} onAction={onAction} onCleanup={() => void cleanupStorage()} onNew={startNewMovie} />
         ) : (
-          <SettingsView project={project} lightMode={lightMode} setLightMode={(value) => { setLightMode(value); document.documentElement.classList.toggle('dark', !value); }} onUpdate={(settings) => void updateProject({ action: 'settings', settings })} />
+          <SettingsView project={project} capabilities={capabilities} lightMode={lightMode} setLightMode={(value) => { setLightMode(value); document.documentElement.classList.toggle('dark', !value); }} onUpdate={(settings) => void updateProject({ action: 'settings', settings })} onAdvanced={() => setView('advanced')} />
         )}
 
         {view === 'chat' && (
@@ -1071,17 +1133,17 @@ function AdvancedControlView({ project, working, onAction, onCleanup, onNew }: {
   </PageFrame>;
 }
 
-function SettingsView({ project, lightMode, setLightMode, onUpdate }: { project: StudioProject | null; lightMode: boolean; setLightMode: (value: boolean) => void; onUpdate: (settings: Partial<StudioProject['settings']>) => void }) {
+function SettingsView({ project, capabilities, lightMode, setLightMode, onUpdate, onAdvanced }: { project: StudioProject | null; capabilities: RuntimeCapabilities; lightMode: boolean; setLightMode: (value: boolean) => void; onUpdate: (settings: Partial<StudioProject['settings']>) => void; onAdvanced: () => void }) {
   const settingSections = [
-    { title: 'Studio access', icon: Sparkles, description: 'Direct project access with no Continuity Studio account or extra sign-in. A live Codex brain is supplied by the local Codex app-server host when that bridge is configured.', control: <Badge variant="outline" className="border-emerald-400/20 bg-emerald-400/10 text-emerald-200">No sign-in gate</Badge> },
+    { title: 'Studio access', icon: Sparkles, description: capabilities.codexBrain === 'connected' ? 'Live Codex reasoning is connected through the local Codex app-server. It uses the Codex environment you already authorized; Continuity Studio has no separate sign-in.' : 'No Continuity Studio sign-in is required. Start the local Codex brain host to replace the deterministic fallback with live reasoning.', control: <Badge variant="outline" className={capabilities.codexBrain === 'connected' ? 'border-emerald-400/20 bg-emerald-400/10 text-emerald-200' : 'border-amber-400/20 bg-amber-400/10 text-amber-200'}>{capabilities.codexBrain === 'connected' ? 'Codex connected' : capabilities.codexBrain === 'checking' ? 'Checking Codex' : 'Fallback active'}</Badge> },
     { title: 'Approval behavior', icon: ShieldCheck, description: 'Choose how non-paid planning advances. Generation remains separately protected.', control: <select aria-label="Approval behavior" disabled={!project} value={project?.settings.approvalMode ?? 'automatic'} onChange={(event) => { const approvalMode = event.target.value as StudioProject['settings']['approvalMode']; onUpdate({ approvalMode, automaticMode: approvalMode === 'automatic', pipelineApprovalGranted: false }); }} className="h-9 rounded-lg border border-border bg-background px-3 text-xs outline-none"><option value="automatic">Automatic</option><option value="master">Master</option><option value="manual">Manual</option></select> },
-    { title: 'Image Generation', icon: ImageIcon, description: project?.settings.imageProvider === 'Not connected' ? 'No image provider connected. Prompts and references remain safe until you choose one.' : project?.settings.imageProvider ?? 'Not connected', control: <Badge variant="outline">Not connected</Badge> },
+    { title: 'Image Generation', icon: ImageIcon, description: capabilities.imageGeneration ? 'OpenAI GPT Image is available for explicit composite-sheet requests. References are sent only after that request.' : 'No server-side image provider key is configured. Prompts and references remain safe.', control: <Badge variant="outline" className={capabilities.imageGeneration ? 'border-emerald-400/20 bg-emerald-400/10 text-emerald-200' : ''}>{capabilities.imageGeneration ? 'GPT Image ready' : 'Not connected'}</Badge> },
     { title: 'Video Generation', icon: Film, description: 'Provider-neutral Seedance packages include dialogue and sound. Video begins only after an explicit Generate command and a paid-attempt confirmation.', control: <Badge variant="outline" className="border-amber-400/20 bg-amber-400/10 text-amber-200">Explicit only</Badge> },
     { title: 'Storage', icon: Upload, description: 'Structured project memory and original media are stored separately and isolated by project ID.', control: <Badge variant="outline">Private</Badge> },
     { title: 'Appearance', icon: lightMode ? Sun : Moon, description: 'Choose the interface contrast for this device.', control: <Switch checked={lightMode} onCheckedChange={setLightMode} /> },
     { title: 'Privacy', icon: Lock, description: 'Media is sent to a provider only when you request generation. API keys never enter exports.', control: <Switch checked={project?.settings.privacyMode ?? true} onCheckedChange={(checked) => onUpdate({ privacyMode: checked })} disabled={!project} /> },
   ];
-  return <PageFrame eyebrow="Quiet controls" title="Settings" description="Provider connections and production defaults stay away from the main filmmaking conversation."><div className="max-w-3xl divide-y divide-border overflow-hidden rounded-2xl border border-border bg-card/55">{settingSections.map(({ title, icon: Icon, description, control }) => <div key={title} className="flex items-center gap-4 p-4 sm:p-5"><span className="grid size-9 shrink-0 place-items-center rounded-lg bg-secondary text-muted-foreground"><Icon className="size-4" /></span><div className="min-w-0 flex-1"><h2 className="text-sm font-medium">{title}</h2><p className="mt-1 text-xs leading-5 text-muted-foreground">{description}</p></div>{control}</div>)}</div><details className="mt-5 max-w-3xl rounded-xl border border-border px-4 py-3"><summary className="cursor-pointer text-sm font-medium">Advanced</summary><p className="mt-3 text-xs leading-5 text-muted-foreground">Provider adapter settings, model preferences, aspect ratio, resolution, storage policy, export policy, and negative rules are available through project chat or a connected provider.</p></details></PageFrame>;
+  return <PageFrame eyebrow="Quiet controls" title="Settings" description="Provider connections and production defaults stay away from the main filmmaking conversation."><div className="max-w-3xl divide-y divide-border overflow-hidden rounded-2xl border border-border bg-card/55">{settingSections.map(({ title, icon: Icon, description, control }) => <div key={title} className="flex items-center gap-4 p-4 sm:p-5"><span className="grid size-9 shrink-0 place-items-center rounded-lg bg-secondary text-muted-foreground"><Icon className="size-4" /></span><div className="min-w-0 flex-1"><h2 className="text-sm font-medium">{title}</h2><p className="mt-1 text-xs leading-5 text-muted-foreground">{description}</p></div>{control}</div>)}</div><details className="mt-5 max-w-3xl rounded-xl border border-border px-4 py-3"><summary className="cursor-pointer text-sm font-medium">Advanced</summary><p className="mt-3 text-xs leading-5 text-muted-foreground">Provider adapter settings, model preferences, aspect ratio, resolution, storage policy, export policy, and negative rules are available through project chat or a connected provider.</p>{project && <Button className="mt-3" size="sm" variant="outline" onClick={onAdvanced}><Network />Open Advanced Control</Button>}</details></PageFrame>;
 }
 
 function EmptyCollection({ icon: Icon, title, text, action }: { icon: typeof Library; title: string; text: string; action?: React.ReactNode }) {

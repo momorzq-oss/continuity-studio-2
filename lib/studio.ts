@@ -30,6 +30,7 @@ import {
   searchProjectData,
 } from './production-control';
 import type { DecisionPin } from './production-control';
+import type { StudioBrainResult, StudioBrainSequence, StudioMovieBlueprint } from './studio-brain';
 
 export type Approval = 'Draft' | 'Approved';
 export type AssetApproval = 'Pending' | 'Approved' | 'Locked' | 'Needs Review';
@@ -403,6 +404,12 @@ export interface StudioProject {
     linkedAssetNumber?: number;
     identityGroupId?: string;
   }>;
+  reasoning: {
+    source: 'Codex' | 'Deterministic fallback';
+    lastAnalyzedAt: string;
+    summary: string;
+    canonicalCommand: string | null;
+  };
   settings: {
     automaticMode: boolean;
     approvalMode: PipelineApprovalMode;
@@ -1068,35 +1075,44 @@ function buildPrompt(
   ].join('\n');
 }
 
-function makeSequences(project: Omit<StudioProject, 'sequences' | 'production'>): StudioSequence[] {
+function makeSequences(
+  project: Omit<StudioProject, 'sequences' | 'production'> & { sequences?: StudioSequence[] },
+  creativePlan: StudioBrainSequence[] = [],
+): StudioSequence[] {
   const beats = ['Arrival', 'Orientation', 'First disturbance', 'Discovery', 'Escalation', 'Point of no return', 'Revelation', 'Confrontation', 'Reversal', 'Final pursuit', 'Climax', 'Aftermath'];
   let remaining = project.durationSeconds;
   const sequences: StudioSequence[] = [];
   for (let index = 0; index < project.sequenceCount; index += 1) {
     const number = index + 1;
+    const prior = creativePlan[index] ?? project.sequences?.find((sequence) => sequence.number === number);
+    const priorStudio = prior && 'id' in prior ? prior as unknown as StudioSequence : undefined;
+    const priorBlueprint = prior && 'locationName' in prior ? prior as StudioBrainSequence : undefined;
     const duration = Math.min(project.sequenceDurationSeconds, remaining);
     remaining -= duration;
-    const title = beats[Math.min(Math.floor((index / Math.max(1, project.sequenceCount - 1)) * (beats.length - 1)), beats.length - 1)];
+    const title = prior?.title || beats[Math.min(Math.floor((index / Math.max(1, project.sequenceCount - 1)) * (beats.length - 1)), beats.length - 1)];
     const relevantAssetRecords = project.assets.filter((asset) => asset.sequences.includes(number)).sort((a, b) => a.projectNumber - b.projectNumber);
     const relevantAssets = relevantAssetRecords.map((asset) => asset.id);
-    const openingState = number === 1 ? `Establish ${project.story.protagonist} and the untouched world.` : `Inherit the approved closing state of SEQUENCE_${String(number - 1).padStart(3, '0')}.`;
-    const closingState = number === project.sequenceCount ? `Resolve the immediate conflict and hold the final emotional image.` : `End on a specific physical and emotional change that motivates Sequence ${number + 1}.`;
+    const openingState = prior?.openingState || (number === 1 ? `Establish ${project.story.protagonist} and the untouched world.` : `Inherit the approved closing state of SEQUENCE_${String(number - 1).padStart(3, '0')}.`);
+    const closingState = prior?.closingState || (number === project.sequenceCount ? `Resolve the immediate conflict and hold the final emotional image.` : `End on a specific physical and emotional change that motivates Sequence ${number + 1}.`);
+    const locationAsset = priorBlueprint
+      ? project.assets.find((asset) => ['Locations', 'Interiors'].includes(asset.category) && asset.name.toLowerCase() === priorBlueprint.locationName.toLowerCase())
+      : undefined;
     const sequenceBase: Omit<StudioSequence, 'prompt' | 'assetManifest' | 'sceneState' | 'sceneGraph' | 'endingState' | 'lookAhead'> = {
       id: `SEQUENCE_${String(number).padStart(3, '0')}`,
       number,
       duration,
       title,
-      purpose: number === 1 ? project.story.beginning : number === project.sequenceCount ? project.story.ending : `${title}: advance the central conflict without repeating the previous action.`,
-      location: number > Math.floor(project.sequenceCount / 3) && project.assets.some((asset) => asset.id === 'LOCATION_002') ? 'LOCATION_002 — The Strange Camp' : 'LOCATION_001 — Primary story location',
-      timeOfDay: /night|dark/i.test(project.idea) ? 'Night' : 'Story-defined progression',
+      purpose: prior?.purpose || (number === 1 ? project.story.beginning : number === project.sequenceCount ? project.story.ending : `${title}: advance the central conflict without repeating the previous action.`),
+      location: locationAsset ? `${locationAsset.id} — ${locationAsset.name}` : priorStudio?.location || (number > Math.floor(project.sequenceCount / 3) && project.assets.some((asset) => asset.id === 'LOCATION_002') ? 'LOCATION_002 — The Strange Camp' : 'LOCATION_001 — Primary story location'),
+      timeOfDay: prior?.timeOfDay || (/night|dark/i.test(project.idea) ? 'Night' : 'Story-defined progression'),
       assetIds: relevantAssets,
       assetNumbers: relevantAssetRecords.map((asset) => asset.projectNumber),
       assetFiles: relevantAssetRecords.map((asset) => asset.generatedFileName),
       openingState,
       closingState,
-      continuitySource: number === 1 ? 'Film Bible and approved reference assets' : `Approved ending state of SEQUENCE_${String(number - 1).padStart(3, '0')}`,
-      status: 'Planned',
-      version: 1,
+      continuitySource: priorStudio?.continuitySource || (number === 1 ? 'Film Bible and approved reference assets' : `Approved ending state of SEQUENCE_${String(number - 1).padStart(3, '0')}`),
+      status: priorStudio?.status ?? 'Planned',
+      version: priorStudio?.version ?? 1,
     };
     const intelligence = makeSceneIntelligence(project, sequenceBase);
     const futureAssets = project.assets
@@ -1115,17 +1131,66 @@ function makeSequences(project: Omit<StudioProject, 'sequences' | 'production'>)
   return sequences;
 }
 
-export function createProjectFromIdea(idea: string): StudioProject {
+const blueprintPrefixes: Record<string, string> = {
+  Characters: 'CHARACTER', Locations: 'LOCATION', Interiors: 'INTERIOR', 'Environment States': 'ENVIRONMENT',
+  Furniture: 'FURNITURE', Props: 'PROP', 'Story Critical Objects': 'OBJECT', Costumes: 'COSTUME', Creatures: 'CREATURE',
+  Animals: 'ANIMAL', Vehicles: 'VEHICLE', Weapons: 'WEAPON', 'Mechanical Systems': 'MECHANICAL',
+  'Transformation Sheets': 'TRANSFORMATION', 'Damage Sheets': 'DAMAGE', Lighting: 'LIGHTING', Effects: 'EFFECT',
+};
+
+function makeAssetsFromBlueprint(blueprint: StudioMovieBlueprint, sequenceCount: number): StudioAsset[] {
+  const protagonist = blueprint.story.protagonist.trim().toLowerCase();
+  const ordered = [...blueprint.assets].sort((left, right) => {
+    const leftMain = left.category === 'Characters' && left.name.trim().toLowerCase() === protagonist;
+    const rightMain = right.category === 'Characters' && right.name.trim().toLowerCase() === protagonist;
+    return Number(rightMain) - Number(leftMain);
+  });
+  const counts = new Map<string, number>();
+  return ordered.map((asset, index) => {
+    const prefix = blueprintPrefixes[asset.category] ?? 'ASSET';
+    const stableIndex = (counts.get(prefix) ?? 0) + 1;
+    counts.set(prefix, stableIndex);
+    const id = `${prefix}_${String(stableIndex).padStart(3, '0')}`;
+    const projectNumber = index + 1;
+    const sequences = [...new Set(asset.sequences.filter((number) => number >= 1 && number <= sequenceCount))].sort((a, b) => a - b);
+    return {
+      id,
+      projectNumber,
+      generatedFileName: numberedAssetFileName({ projectNumber, name: asset.name }),
+      ...makeAssetIntelligence(id, asset.importance, asset.category),
+      name: asset.name,
+      category: asset.category,
+      description: asset.description,
+      storyPurpose: asset.storyPurpose,
+      sequences: sequences.length ? sequences : Array.from({ length: sequenceCount }, (_, sequence) => sequence + 1),
+      approvalState: 'Pending',
+      lockState: 'Unlocked',
+      lifecycleStatus: 'Active',
+      version: 1,
+      referenceCount: 0,
+      notes: 'Discovered by Codex from the complete movie blueprint.',
+      continuityConstraints: asset.continuityConstraints,
+    };
+  });
+}
+
+export function createProjectFromIdea(idea: string, brainResult?: StudioBrainResult | null): StudioProject {
   const createdAt = nowIso();
   const projectId = uid('project');
-  const [genre, subgenre] = inferGenre(idea);
-  const { region, period, setting } = inferContext(idea);
-  const durationSeconds = inferDurationSeconds(idea);
+  const blueprint = brainResult?.mode === 'project-blueprint' ? brainResult.blueprint : null;
+  const inferredGenre = inferGenre(idea);
+  const inferredContext = inferContext(idea);
+  const genre = blueprint?.genre ?? inferredGenre[0];
+  const subgenre = blueprint?.subgenre ?? inferredGenre[1];
+  const region = blueprint?.region ?? inferredContext.region;
+  const period = blueprint?.period ?? inferredContext.period;
+  const setting = blueprint?.setting ?? inferredContext.setting;
+  const durationSeconds = blueprint?.durationSeconds ?? inferDurationSeconds(idea);
   const sequenceDurationSeconds = 30;
   const sequenceCount = Math.ceil(durationSeconds / sequenceDurationSeconds);
-  const title = inferTitle(idea);
-  const story = makeStoryFromIdea(idea);
-  const filmBible = {
+  const title = blueprint?.title ?? inferTitle(idea);
+  const story = blueprint ? { version: 1, status: 'Draft' as const, ...blueprint.story } : makeStoryFromIdea(idea);
+  const filmBible = blueprint ? { version: 1, status: 'Draft' as const, ...blueprint.filmBible } : {
     version: 1,
     status: 'Draft' as const,
     worldRules: [`Period: ${period}. Region: ${region}.`, 'The environment changes only when a sequence records the change.'],
@@ -1139,18 +1204,18 @@ export function createProjectFromIdea(idea: string): StudioProject {
     continuityRules: ['Every approved closing state becomes the next expected opening state.', 'Every sequence lists exact permanent asset numbers and their matching NNN_NAME_GENERATED.png files. Internal stable IDs remain secondary implementation keys.'],
     negativeRules: ['No duplicate identities.', 'No unplanned people, props, animals, vehicles, creatures, or locations.', 'No unexplained costume, light, weather, or screen-direction changes.'],
   };
-  const visualStyle = genre === 'Horror' ? 'Grounded atmospheric realism with controlled shadows and tactile texture' : 'Grounded cinematic realism with coherent production design';
-  const lightingDirection = /night|dark/i.test(idea) ? 'Motivated night sources with protected facial identity' : 'Motivated naturalistic light with consistent direction';
+  const visualStyle = blueprint?.visualStyle || (genre === 'Horror' ? 'Grounded atmospheric realism with controlled shadows and tactile texture' : 'Grounded cinematic realism with coherent production design');
+  const lightingDirection = blueprint?.lightingDirection || (/night|dark/i.test(idea) ? 'Motivated night sources with protected facial identity' : 'Motivated naturalistic light with consistent direction');
   const projectBase: Omit<StudioProject, 'sequences' | 'production'> = {
     id: projectId, storageRevision: 0, title, createdAt, updatedAt: createdAt, pinned: false, archived: false, idea,
     durationSeconds, sequenceDurationSeconds, sequenceCount, genre, subgenre, setting, region, period,
-    dialogueLanguage: 'Story-defined', aspectRatio: '16:9', resolution: '4K',
+    dialogueLanguage: blueprint?.dialogueLanguage ?? 'Story-defined', aspectRatio: '16:9', resolution: '4K',
     visualStyle,
-    cameraStyle: 'Deliberate, motivated movement with stable screen direction', lensDirection: '35mm and 50mm natural-perspective language',
+    cameraStyle: blueprint?.cameraStyle || 'Deliberate, motivated movement with stable screen direction', lensDirection: blueprint?.lensDirection || '35mm and 50mm natural-perspective language',
     lightingDirection,
-    colorDirection: genre === 'Horror' ? 'Muted earth tones, deep navy shadows, restrained warm practicals' : 'Natural color with a controlled tonal arc',
+    colorDirection: blueprint?.colorDirection || (genre === 'Horror' ? 'Muted earth tones, deep navy shadows, restrained warm practicals' : 'Natural color with a controlled tonal arc'),
     soundDirection: 'Seedance in-video generation from exact dialogue, physical ambience, requested effects or music, and purposeful silence instructions', story, filmBible,
-    worldBible: makeWorldBible({ idea, region, period, setting, genre, visualStyle, lightingDirection }),
+    worldBible: blueprint ? { version: 1, status: 'Draft', ...blueprint.worldBible } : makeWorldBible({ idea, region, period, setting, genre, visualStyle, lightingDirection }),
     locations: [],
     environments: [],
     assets: [] as StudioAsset[], continuity: { status: 'Not started', events: [] as ContinuityEvent[] },
@@ -1164,6 +1229,12 @@ export function createProjectFromIdea(idea: string): StudioProject {
     knowledgeGraph: { nodes: [], edges: [] },
     stateEvents: [],
     stage: 'Story' as const, currentSequence: 1, exportStatus: 'Not exported', attachments: [],
+    reasoning: {
+      source: blueprint ? 'Codex' : 'Deterministic fallback',
+      lastAnalyzedAt: createdAt,
+      summary: brainResult?.reasoningSummary ?? 'Codex bridge was unavailable; the deterministic production fallback created this draft.',
+      canonicalCommand: null,
+    },
     settings: {
       automaticMode: true,
       approvalMode: 'automatic',
@@ -1176,19 +1247,25 @@ export function createProjectFromIdea(idea: string): StudioProject {
       privacyMode: true,
     },
   };
-  projectBase.assets = makeAssets(idea, sequenceCount, setting);
+  projectBase.assets = blueprint ? makeAssetsFromBlueprint(blueprint, sequenceCount) : makeAssets(idea, sequenceCount, setting);
   projectBase.flatAssetFolder.nextUnusedNumber = projectBase.assets.length + 1;
   projectBase.locations = makeLocations(projectBase);
   projectBase.environments = makeEnvironments(projectBase);
-  const project = { ...projectBase, sequences: makeSequences(projectBase), production: undefined as unknown as ProductionSystem } as StudioProject;
+  const project = { ...projectBase, sequences: makeSequences(projectBase, blueprint?.sequences), production: undefined as unknown as ProductionSystem } as StudioProject;
   project.knowledgeGraph = makeKnowledgeGraph(project);
   project.production = initializeProductionSystem(project);
-  return project;
+  return normalizeProject(project);
 }
 
 export function normalizeProject(project: StudioProject): StudioProject {
   const next = structuredClone(project) as StudioProject;
   next.storageRevision = Number.isInteger(next.storageRevision) ? next.storageRevision : 0;
+  next.reasoning ??= {
+    source: 'Deterministic fallback',
+    lastAnalyzedAt: next.updatedAt ?? nowIso(),
+    summary: 'This project predates the live Codex reasoning bridge and remains on the deterministic fallback until Codex analyzes a new instruction.',
+    canonicalCommand: null,
+  };
   next.settings = {
     automaticMode: next.settings?.automaticMode ?? true,
     approvalMode: next.settings?.approvalMode ?? (next.settings?.automaticMode === false ? 'manual' : 'automatic'),
@@ -1226,7 +1303,7 @@ export function normalizeProject(project: StudioProject): StudioProject {
       ...next.worldBible.objectRules,
     ];
   }
-  const inferredAssets = makeAssets(next.idea, next.sequenceCount, next.setting);
+  const inferredAssets = next.reasoning.source === 'Codex' ? [] : makeAssets(next.idea, next.sequenceCount, next.setting);
   const existingAssetIds = new Set((next.assets ?? []).map((asset) => asset.id));
   const combinedAssets = [...(next.assets ?? []), ...inferredAssets.filter((asset) => !existingAssetIds.has(asset.id))];
   const reservedNumbers = new Set((next.assets ?? []).map((asset) => asset.projectNumber).filter((value) => Number.isInteger(value) && value > 0));
@@ -1289,7 +1366,7 @@ export function normalizeProject(project: StudioProject): StudioProject {
     identityGroupId: attachment.identityGroupId ?? (attachment.linkedAssetId === 'CHARACTER_001' ? 'CHARACTER_IDENTITY_001' : undefined),
   }));
   const previousSequences = new Map((next.sequences ?? []).map((sequence) => [sequence.id, sequence]));
-  const regenerated = makeSequences({ ...next, sequences: undefined, production: undefined } as unknown as Omit<StudioProject, 'sequences' | 'production'>);
+  const regenerated = makeSequences(next);
   next.sequences = regenerated.map((sequence) => {
     const previous = previousSequences.get(sequence.id);
     if (!previous) return sequence;
@@ -1394,13 +1471,21 @@ function decisionPinTarget(project: StudioProject, input: string): Omit<Decision
   return null;
 }
 
-export function interpretStudioMessage(project: StudioProject, input: string, options?: { preferredAttachmentId?: string }): { project: StudioProject; response: StudioMessage; sideEffect?: 'export' | 'asset-export' } {
+export function interpretStudioMessage(project: StudioProject, input: string, options?: { preferredAttachmentId?: string; imageGenerationAvailable?: boolean; brainResult?: StudioBrainResult | null }): { project: StudioProject; response: StudioMessage; sideEffect?: 'export' | 'asset-export' | 'image-generation' } {
   const next = normalizeProject(project);
   const preferredAttachment = options?.preferredAttachmentId
     ? next.attachments.find((attachment) => attachment.id === options.preferredAttachmentId)
     : undefined;
   const lower = input.trim().toLowerCase();
   next.updatedAt = nowIso();
+  if (options?.brainResult) {
+    next.reasoning = {
+      source: 'Codex',
+      lastAnalyzedAt: next.updatedAt,
+      summary: options.brainResult.reasoningSummary,
+      canonicalCommand: options.brainResult.canonicalCommand,
+    };
+  }
   buildRelevantProjectContext(next, input);
 
   const pinTarget = decisionPinTarget(next, input);
@@ -1547,7 +1632,9 @@ export function interpretStudioMessage(project: StudioProject, input: string, op
       brief: `One coherent professional reference board for the same locked identity, using ${sourceReferences.length} source photograph${sourceReferences.length === 1 ? '' : 's'} to select approximately ${panelCount} useful views. Front, profile, three-quarter, full-body, rear, and face-detail views are panels inside one image when useful; panels never become separate assets. Preserve face identity, body proportions, age appearance, skin, hair, and permanent characteristics.`,
     };
     mainCharacter.notes = `${mainCharacter.sheet.brief} One file, one permanent asset number, no gallery of separate generated views.`;
-    return { project: next, response: message(`${sourceReferences.length} source photograph${sourceReferences.length === 1 ? '' : 's'} now contribute to one locked character identity. I prepared one composite Master Character Sheet for ${assetProductionReference(mainCharacter)}: one image file, one asset number, with approximately ${panelCount} production views arranged as panels on the same board. ${next.settings.imageProvider === 'Not connected' ? 'No image provider is connected, so I stopped at the ready generation brief and did not create fake media.' : 'This explicit request authorizes one image-generation job only; it never authorizes video.'}`, { kind: 'asset-generation', assetIds: [mainCharacter.id] }) };
+    const providerReady = options?.imageGenerationAvailable === true;
+    next.settings.imageProvider = providerReady ? 'OpenAI GPT Image' : 'Not connected';
+    return { project: next, response: message(`${sourceReferences.length} source photograph${sourceReferences.length === 1 ? '' : 's'} now contribute to one locked character identity. I prepared one composite Master Character Sheet for ${assetProductionReference(mainCharacter)}: one image file, one asset number, with approximately ${panelCount} production views arranged as panels on the same board. ${providerReady ? 'This explicit request now authorizes one GPT Image generation job only; it never authorizes video.' : 'No image provider is connected, so I stopped at the ready generation brief and did not create fake media.'}`, { kind: 'asset-generation', assetIds: [mainCharacter.id] }), sideEffect: providerReady ? 'image-generation' : undefined };
   }
   const productionSheetMatch = lower.match(/(?:create|make|generate) (?:the )?(?:master )?(environment|location|interior|prop|costume|creature|animal|vehicle|weapon|transformation|mechanical|damage)(?: reference)? sheet/);
   if (productionSheetMatch) {
@@ -1569,7 +1656,9 @@ export function interpretStudioMessage(project: StudioProject, input: string, op
       brief: `One coherent composed reference board for ${sheetAsset.name}. Use approximately four production views or details inside one image only when they belong to the same stable asset or state. Viewing angles and detail panels never receive separate numbers. A genuinely different state, costume, transformation, or damage condition remains a separately discovered production asset.`,
     };
     sheetAsset.notes = `${sheetAsset.sheet.brief} One file, one permanent asset number.`;
-    return { project: next, response: message(`I prepared one composite ${sheetAsset.sheet.kind} for ${assetProductionReference(sheetAsset)}. It remains one file and one permanent production asset; its panels do not increase the asset count. ${next.settings.imageProvider === 'Not connected' ? 'No image provider is connected, so this is a ready brief rather than fake generated media.' : 'This explicit request authorizes one image-generation job only and never authorizes video.'}`, { kind: 'asset-generation', assetIds: [sheetAsset.id] }) };
+    const providerReady = options?.imageGenerationAvailable === true;
+    next.settings.imageProvider = providerReady ? 'OpenAI GPT Image' : 'Not connected';
+    return { project: next, response: message(`I prepared one composite ${sheetAsset.sheet.kind} for ${assetProductionReference(sheetAsset)}. It remains one file and one permanent production asset; its panels do not increase the asset count. ${providerReady ? 'This explicit request now authorizes one GPT Image generation job only and never authorizes video.' : 'No image provider is connected, so this is a ready brief rather than fake generated media.'}`, { kind: 'asset-generation', assetIds: [sheetAsset.id] }), sideEffect: providerReady ? 'image-generation' : undefined };
   }
   if (/approve all assets|lock all assets/.test(lower)) {
     if (!canPerformProjectAction(next, 'approve-assets')) return { project: next, response: message(`Asset approval is not legal while the project is ${next.production.control.stateMachine.current}. Complete the approved story, World Bible, and Film Bible first; no asset changed.`, { kind: 'control' }) };
