@@ -23,7 +23,7 @@
     "start": "wrangler dev --config dist/server/wrangler.json",
     "lint": "oxlint",
     "typecheck": "tsc --noEmit",
-    "test": "node --test tests/acceptance.test.mjs tests/provider.test.mjs",
+    "test": "node --experimental-strip-types --test tests/acceptance.test.mjs tests/provider.test.mjs",
     "test:ui": "playwright test",
     "test:all": "npm test && npm run test:ui",
     "format": "oxfmt",
