@@ -1,6 +1,7 @@
 import { ensureSchema, getRuntimeEnv } from '@/db/runtime';
 import { createVerifiedArchive } from '@/lib/archive-verification';
 import { collectFlatGeneratedAssets } from '@/lib/flat-asset-export';
+import { decodeProjectState } from '@/lib/project-state-codec';
 import { normalizeProject, type StudioProject } from '@/lib/studio';
 
 export const runtime = 'edge';
@@ -15,7 +16,7 @@ export async function GET(request: Request) {
       .bind(projectId)
       .first<{ state_json: string }>();
     if (!row) return Response.json({ error: 'That project is no longer available.' }, { status: 404 });
-    const project = normalizeProject(JSON.parse(row.state_json) as StudioProject);
+    const project = normalizeProject(await decodeProjectState<StudioProject>(row.state_json));
     const flat = await collectFlatGeneratedAssets(project, DB, FILES);
     if (flat.exportedAssetNumbers.length === 0) {
       return Response.json({

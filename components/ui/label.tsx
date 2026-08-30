@@ -4,6 +4,8 @@ import * as React from 'react';
 
 import { cn } from '@/lib/utils';
 
+/* oxlint-disable jsx-a11y/label-has-associated-control -- Call sites associate this reusable primitive through htmlFor or a wrapped control. */
+
 function Label({ className, ...props }: React.ComponentProps<'label'>) {
   return (
     <label

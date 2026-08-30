@@ -1,4 +1,5 @@
 import { ensureSchema, getRuntimeEnv } from '@/db/runtime';
+import { decodeProjectState, encodeProjectState } from '@/lib/project-state-codec';
 import { normalizeProject, nowIso, type StudioProject } from '@/lib/studio';
 
 export const runtime = 'edge';
@@ -56,7 +57,7 @@ export async function POST(request: Request) {
       LEFT JOIN project_transactions t ON t.project_id = p.id WHERE p.id = ? AND p.archived = 0`).bind(body.projectId).first<{ state_json: string; revision: number }>();
     if (!row) return Response.json({ error: 'Project not found.' }, { status: 404 });
     if ((body.expectedRevision ?? row.revision) !== row.revision) return Response.json({ error: 'The project changed before cleanup. Reload and review the cleanup candidates again.', conflict: true }, { status: 409 });
-    const before = normalizeProject(JSON.parse(row.state_json) as StudioProject);
+    const before = normalizeProject(await decodeProjectState<StudioProject>(row.state_json));
     const report = await storageReport(body.projectId);
     const removed: string[] = [];
     for (const candidate of report.cleanupCandidates) {
@@ -82,11 +83,12 @@ export async function POST(request: Request) {
     const changeId = `change_${crypto.randomUUID()}`;
     const summary = `Safe storage cleanup removed ${removed.length} unused preview or failed-generation object(s); originals and approved media were protected.`;
     project.production.control.changeLog.push({ id: changeId, revision: nextRevision, scope: 'storage-cleanup', summary, createdAt });
+    const [encodedBefore, encodedProject] = await Promise.all([encodeProjectState(before), encodeProjectState(project)]);
     const statements: D1PreparedStatement[] = [
       DB.prepare(`INSERT INTO transaction_guards (id, project_id, revision_ok, created_at)
         SELECT ?, ?, CASE WHEN revision = ? THEN 1 ELSE 0 END, ? FROM project_transactions WHERE project_id = ?`).bind(transactionId, project.id, row.revision, createdAt, project.id),
-      DB.prepare('INSERT INTO project_recovery_snapshots (id, project_id, reason, state_json, created_at) VALUES (?, ?, ?, ?, ?)').bind(snapshotId, project.id, summary, JSON.stringify(before), createdAt),
-      DB.prepare('UPDATE projects SET state_json = ?, updated_at = ? WHERE id = ?').bind(JSON.stringify(project), createdAt, project.id),
+      DB.prepare('INSERT INTO project_recovery_snapshots (id, project_id, reason, state_json, created_at) VALUES (?, ?, ?, ?, ?)').bind(snapshotId, project.id, summary, encodedBefore, createdAt),
+      DB.prepare('UPDATE projects SET state_json = ?, updated_at = ? WHERE id = ?').bind(encodedProject, createdAt, project.id),
       DB.prepare('UPDATE project_transactions SET revision = ?, last_transaction_id = ?, updated_at = ? WHERE project_id = ?').bind(nextRevision, transactionId, createdAt, project.id),
       DB.prepare('INSERT INTO production_change_log (id, project_id, revision, scope, summary, before_snapshot_id, after_state_hash, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').bind(changeId, project.id, nextRevision, 'storage-cleanup', summary, snapshotId, `${JSON.stringify(project).length.toString(16)}-${createdAt}`, createdAt),
       DB.prepare('INSERT INTO storage_cleanup_log (id, project_id, removed_json, protected_original_count, protected_approved_count, bytes_before, bytes_after, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').bind(`cleanup_${crypto.randomUUID()}`, project.id, JSON.stringify(removed), report.protectedOriginalCount, report.protectedApprovedCount, report.totalBytes, after.totalBytes, createdAt),

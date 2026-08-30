@@ -33,6 +33,7 @@ import type { DecisionPin } from './production-control';
 
 export type Approval = 'Draft' | 'Approved';
 export type AssetApproval = 'Pending' | 'Approved' | 'Locked' | 'Needs Review';
+export type PipelineApprovalMode = 'automatic' | 'master' | 'manual';
 export type SequenceStatus =
   | 'Planned'
   | 'Ready'
@@ -46,6 +47,15 @@ export interface StudioAsset {
   id: string;
   projectNumber: number;
   generatedFileName: string;
+  generatedAttachmentId?: string;
+  sheet?: {
+    kind: string;
+    composite: true;
+    panelCount: number;
+    sourceReferenceIds: string[];
+    generationStatus: 'Prepared' | 'Generated';
+    brief: string;
+  };
   name: string;
   category: string;
   description: string;
@@ -288,7 +298,7 @@ export interface StudioMessage {
   content: string;
   createdAt: string;
   metadata?: {
-    kind?: 'story' | 'bible' | 'world' | 'assets' | 'sequence' | 'scene' | 'graph' | 'coverage' | 'lookahead' | 'status' | 'readiness' | 'timing' | 'dialogue' | 'reference-package' | 'queue' | 'validation' | 'assembly' | 'export' | 'flat-assets' | 'attachment' | 'import' | 'control' | 'integrity' | 'note';
+    kind?: 'story' | 'script' | 'scenario' | 'prompt' | 'bible' | 'world' | 'assets' | 'asset-generation' | 'sequence' | 'scene' | 'graph' | 'coverage' | 'lookahead' | 'status' | 'readiness' | 'timing' | 'dialogue' | 'reference-package' | 'queue' | 'validation' | 'assembly' | 'approval' | 'export' | 'flat-assets' | 'attachment' | 'import' | 'control' | 'integrity' | 'note';
     sequenceNumber?: number;
     assetIds?: string[];
     attachmentId?: string;
@@ -391,9 +401,13 @@ export interface StudioProject {
     integrityStatus?: 'Original' | 'Duplicate' | 'Missing' | 'Corrupt' | 'Verified';
     linkedAssetId?: string;
     linkedAssetNumber?: number;
+    identityGroupId?: string;
   }>;
   settings: {
     automaticMode: boolean;
+    approvalMode: PipelineApprovalMode;
+    pipelineApprovalGranted: boolean;
+    automaticPaidGeneration: boolean;
     imageProvider: string;
     videoProvider: string;
     defaultAspectRatio: string;
@@ -491,8 +505,10 @@ function inferContext(text: string) {
       ? 'Desert region'
       : 'Unspecified region';
   const period = text.match(/\b(18|19|20)\d{2}\b/)?.[0] ?? 'Contemporary';
-  const setting = /desert/.test(lower)
-    ? 'Open desert and an isolated encampment'
+  const setting = /observatory/.test(lower)
+    ? 'A remote desert observatory, its control room, and the surrounding open desert'
+    : /desert/.test(lower)
+      ? 'Open desert and an isolated encampment'
     : /city|urban/.test(lower)
       ? 'Urban environment'
       : /forest|woods/.test(lower)
@@ -505,6 +521,9 @@ function inferContext(text: string) {
 
 function inferTitle(text: string) {
   const lower = text.toLowerCase();
+  if (/tomorrow(?:'s|s)?\s+emergency broadcasts?/.test(lower)) return "Tomorrow's Emergency Broadcasts";
+  if (/signal keeper/.test(lower) && /tomorrow/.test(lower)) return "The Signal Keeper's Tomorrow";
+  if (/observatory/.test(lower) && /(voice|transmission|signal)/.test(lower)) return /sunrise|dawn/.test(lower) ? 'The Voice at Sunrise' : 'The Voice Beyond the Door';
   if (/camp/.test(lower) && /(dark|night|horror|strange)/.test(lower)) return 'The Camp After Dark';
   if (/desert/.test(lower)) return 'Across the Empty Sand';
   if (/space|planet/.test(lower)) return 'Beyond the Last Signal';
@@ -515,6 +534,45 @@ function inferTitle(text: string) {
     return words.map((word) => word[0]?.toUpperCase() + word.slice(1).toLowerCase()).join(' ');
   }
   return 'Untitled Production';
+}
+
+function inferProtagonist(text: string) {
+  const lower = text.toLowerCase();
+  if (/radio astronomer|astronomer/.test(lower)) return 'The Radio Astronomer';
+  if (/signal keeper/.test(lower)) return 'The Signal Keeper';
+  if (/traveller|traveler/.test(lower)) return 'The Traveller';
+  if (/courier/.test(lower)) return 'The Courier';
+  return 'The protagonist';
+}
+
+function approvedPremise(text: string) {
+  let premise = text.trim()
+    .replace(/^(?:rewrite|change|update)\s+(?:the\s+)?(?:story|premise)\s*:\s*/i, '')
+    .replace(/^(?:a\s+)?(?:\d+(?:\.\d+)?|one|two|three|four|five|six|seven|eight|nine|ten)[- ]minute\s+/i, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!premise) premise = 'A character faces a specific escalating problem in a coherent cinematic world.';
+  premise = premise[0].toUpperCase() + premise.slice(1);
+  return /[.!?]$/.test(premise) ? premise : `${premise}.`;
+}
+
+function makeStoryFromIdea(idea: string, version = 1): StudioProject['story'] {
+  const premise = approvedPremise(idea);
+  const protagonist = inferProtagonist(idea);
+  const warningPremise = /warning|warns?/.test(idea.toLowerCase());
+  const doorPremise = /(?:open|opening).*(?:door)|door.*(?:open|opening)/i.test(idea);
+  return {
+    version,
+    status: 'Draft',
+    logline: premise,
+    protagonist,
+    conflict: `${protagonist} must determine whether the central warning in the approved premise is protection, manipulation, or evidence of an immediate physical threat.`,
+    beginning: `Establish ${protagonist.toLowerCase()}, the exact location and time, and the normal routine before the approved premise interrupts it: ${premise}`,
+    escalation: 'Each sequence reveals a new verifiable consequence of the central signal while narrowing the protagonist’s safe choices without introducing unapproved story elements.',
+    midpoint: warningPremise ? 'The warning reveals knowledge only the protagonist should possess, proving the threat is personal and already connected to the location.' : 'The apparent explanation collapses, making the threat immediate and personal.',
+    climax: doorPremise ? `${protagonist} must decide whether opening the door causes the warned event or is the only way to stop it.` : `${protagonist} must act on incomplete information as the physical and emotional continuity converge.`,
+    ending: warningPremise ? 'Resolve the immediate choice and end on a concrete visual consequence of the transmission that recontextualizes its source.' : 'Resolve the immediate action while leaving a final image earned by the approved premise.',
+  };
 }
 
 function makeAssetIntelligence(
@@ -555,7 +613,7 @@ function makeAssetIntelligence(
 function makeAssets(idea: string, sequenceCount: number, setting: string): StudioAsset[] {
   const lower = idea.toLowerCase();
   const allSequences = Array.from({ length: sequenceCount }, (_, i) => i + 1);
-  const protagonist = /traveller|traveler/.test(lower) ? 'The Traveller' : 'Protagonist';
+  const protagonist = inferProtagonist(idea).replace(/^The\s+/i, '');
   const assets: Array<Omit<StudioAsset, 'projectNumber' | 'generatedFileName'>> = [
     {
       id: 'CHARACTER_001',
@@ -575,7 +633,7 @@ function makeAssets(idea: string, sequenceCount: number, setting: string): Studi
     {
       id: 'LOCATION_001',
       ...makeAssetIntelligence('LOCATION_001', 'Location anchor', 'Locations'),
-      name: /desert/.test(lower) ? 'Desert Crossing' : 'Primary Location',
+      name: /observatory/.test(lower) ? 'Remote Desert Observatory' : /desert/.test(lower) ? 'Desert Crossing' : 'Primary Location',
       category: 'Locations',
       description: setting,
       storyPurpose: 'Primary world and spatial anchor.',
@@ -588,6 +646,48 @@ function makeAssets(idea: string, sequenceCount: number, setting: string): Studi
       continuityConstraints: ['Track time of day, weather, damage, and object placement'],
     },
   ];
+
+  const nextStableId = (prefix: string) => {
+    const next = Math.max(0, ...assets.filter((asset) => asset.id.startsWith(`${prefix}_`)).map((asset) => Number(asset.id.split('_')[1]) || 0)) + 1;
+    return `${prefix}_${String(next).padStart(3, '0')}`;
+  };
+
+  if (/observatory/.test(lower)) {
+    assets.push({
+      id: 'INTERIOR_001', name: 'Observatory Control Room', category: 'Interiors',
+      ...makeAssetIntelligence('INTERIOR_001', 'Location anchor', 'Interiors'),
+      description: 'The observatory control room with a fixed exterior door, radio console, telescope controls, work surfaces, windows, monitors, and camera-safe movement paths.',
+      storyPurpose: 'Primary dramatic interior and spatial anchor.', sequences: allSequences, approvalState: 'Pending', lockState: 'Unlocked', lifecycleStatus: 'Active', version: 1, referenceCount: 0, notes: '',
+      continuityConstraints: ['Lock the door, windows, radio console, telescope controls, furniture, screen positions, sunrise direction, and movement paths'],
+    });
+    assets.push({
+      id: 'MECHANICAL_001', name: 'Radio Telescope Array', category: 'Mechanical Systems',
+      ...makeAssetIntelligence('MECHANICAL_001', 'Story critical', 'Mechanical Systems'),
+      description: 'The observatory radio telescope array, including dish geometry, mounts, motors, cable runs, orientation, operating lights, and azimuth/elevation state.',
+      storyPurpose: 'Receives the impossible transmission and provides the film’s mechanical visual identity.', sequences: allSequences, approvalState: 'Pending', lockState: 'Unlocked', lifecycleStatus: 'Active', version: 1, referenceCount: 0, notes: '',
+      continuityConstraints: ['Track dish orientation, movement, power, indicator lights, cable connections, and damage'],
+    });
+  }
+  if (/radio|transmission|signal/.test(lower)) {
+    const radioId = nextStableId('PROP');
+    assets.push({
+      id: radioId, name: 'Observatory Radio Console', category: 'Props',
+      ...makeAssetIntelligence(radioId, 'Story critical', 'Props'),
+      description: 'A specific radio transceiver and recording console with stable controls, microphone, speaker, displays, indicator states, cables, and recorded-message state.',
+      storyPurpose: 'Delivers and records the story-critical transmission.', sequences: allSequences, approvalState: 'Pending', lockState: 'Unlocked', lifecycleStatus: 'Active', version: 1, referenceCount: 0, notes: '',
+      continuityConstraints: ['Track power, frequency, recording state, display content, cable connections, and who operates it'],
+    });
+  }
+  if (/door/.test(lower) && /observatory/.test(lower)) {
+    const doorId = nextStableId('PROP');
+    assets.push({
+      id: doorId, name: 'Observatory Exterior Door', category: 'Props',
+      ...makeAssetIntelligence(doorId, 'Story critical', 'Props'),
+      description: 'The control room’s heavy exterior door with stable materials, hinges, locking hardware, window, seals, handle, and open/closed/locked state.',
+      storyPurpose: 'Physical focus of the warning and central decision.', sequences: allSequences, approvalState: 'Pending', lockState: 'Unlocked', lifecycleStatus: 'Active', version: 1, referenceCount: 0, notes: '',
+      continuityConstraints: ['Track open, closed, locked, damaged, blocked, and viewed-from-side states'],
+    });
+  }
 
   if (/camp|encampment/.test(lower)) {
     assets.push({
@@ -641,7 +741,7 @@ function makeAssets(idea: string, sequenceCount: number, setting: string): Studi
       continuityConstraints: ['Track owner, holder, location, activation, ammunition, visibility, and damage'],
     });
   }
-  if (/robot|machine|mechanical|deploy|fold|transform/.test(lower)) {
+  if (/robot|machine|mechanical|deploy|fold|transform/.test(lower) && !assets.some((asset) => asset.id === 'MECHANICAL_001')) {
     assets.push({
       id: 'MECHANICAL_001', name: 'Mechanical System', category: 'Mechanical Systems',
       ...makeAssetIntelligence('MECHANICAL_001', 'Story critical', 'Mechanical Systems'),
@@ -717,8 +817,8 @@ function makeWorldBible(input: {
     historicalPeriod: input.period,
     culture: input.region === 'United Arab Emirates' ? 'Regionally grounded Emirati and Gulf material culture appropriate to the stated period' : 'Story-defined local culture with no imported visual assumptions',
     technologyLevel: historical ? `Only technology documented or plausible for ${input.period}` : 'Contemporary technology only when introduced by the story',
-    architecture: /camp|tent/.test(lower) ? ['Portable period-appropriate shelters', 'Low-profile structures shaped by climate and terrain'] : ['Architecture must be established by approved location assets'],
-    constructionMaterials: /desert/.test(lower) ? ['Canvas', 'Timber', 'Rope', 'Stone', 'Compacted sand'] : ['Materials must match geography, period, and local construction'],
+    architecture: /observatory/.test(lower) ? ['Remote scientific observatory with an approved exterior silhouette', 'A fixed control-room layout physically connected to the telescope array and exterior door'] : /camp|tent/.test(lower) ? ['Portable period-appropriate shelters', 'Low-profile structures shaped by climate and terrain'] : ['Architecture must be established by approved location assets'],
+    constructionMaterials: /observatory/.test(lower) ? ['Weathered concrete', 'Painted structural steel', 'Glass', 'Insulated metal doors', 'Cable trays', 'Compacted desert aggregate'] : /desert/.test(lower) ? ['Canvas', 'Timber', 'Rope', 'Stone', 'Compacted sand'] : ['Materials must match geography, period, and local construction'],
     interiorDesign: ['Interiors preserve layout, entrances, exits, permanent fixtures, and connected-room logic'],
     furnitureStyle: historical ? [`Furniture and set dressing appropriate to ${input.period}`] : ['Furniture follows the approved location design language'],
     terrain: /desert/.test(lower) ? ['Dunes', 'Compacted sand paths', 'Wind-shaped surfaces', 'Trackable footprints'] : [input.setting],
@@ -748,7 +848,8 @@ function makeLocations(project: Pick<StudioProject, 'assets' | 'period' | 'regio
   return locationAssets.map((asset, index) => {
     const interior = asset.category === 'Interiors';
     const isCamp = /camp|tent/i.test(asset.name);
-    const pairedExterior = project.assets.find((item) => item.id === 'LOCATION_002')?.id;
+    const isObservatory = /observatory/i.test(asset.name);
+    const pairedExterior = isObservatory ? project.assets.find((item) => item.id === 'LOCATION_001')?.id : project.assets.find((item) => item.id === 'LOCATION_002')?.id;
     return {
       id: asset.id,
       name: asset.name,
@@ -757,7 +858,7 @@ function makeLocations(project: Pick<StudioProject, 'assets' | 'period' | 'regio
       period: project.period,
       geography: project.region,
       terrain: interior ? 'Enclosed movement surface' : project.setting,
-      architecture: isCamp ? 'Portable shelter architecture with fixed approved layout' : 'Architecture locked by the approved location reference',
+      architecture: isObservatory ? 'Fixed scientific-observatory architecture with an approved exterior, control-room plan, telescope relationship, and door axis' : isCamp ? 'Portable shelter architecture with fixed approved layout' : 'Architecture locked by the approved location reference',
       scale: interior ? 'Human-scale structured room' : 'Wide environment with explicit landmarks',
       dimensions: interior ? 'Relative dimensions stored from entrance, furniture, and camera clearances' : 'Scale inferred from approved landmarks and travel time',
       materials: interior
@@ -770,11 +871,11 @@ function makeLocations(project: Pick<StudioProject, 'assets' | 'period' | 'regio
       furniture: project.assets.filter((item) => item.category === 'Furniture' && item.sequences.some((n) => asset.sequences.includes(n))).map((item) => item.id),
       permanentObjects: project.assets.filter((item) => item.currentState.currentLocation === asset.id && item.importance !== 'Incidental').map((item) => item.id),
       temporaryObjects: [],
-      lightingSources: /night|dark/i.test(project.idea) ? ['Moonlight', 'Approved practical light assets'] : ['Approved natural and practical sources'],
+      lightingSources: /sunrise|dawn/i.test(project.idea) ? ['Low sunrise', 'Approved control-room practicals', 'Monitor and indicator sources'] : /night|dark/i.test(project.idea) ? ['Moonlight', 'Approved practical light assets'] : ['Approved natural and practical sources'],
       environmentalFeatures: /desert/i.test(project.idea) ? ['Dunes', 'Wind-shaped surface', 'Tracks and footprints'] : ['Features defined by approved references'],
       vegetation: /desert/i.test(project.idea) ? ['Sparse native arid vegetation'] : ['World Bible vegetation only'],
       weatherStates: ['ENVIRONMENT_001'],
-      timeStates: /night|dark/i.test(project.idea) ? ['Night'] : ['Story timeline progression'],
+      timeStates: /sunrise|dawn/i.test(project.idea) ? ['Pre-sunrise blue hour', 'Sunrise progression'] : /night|dark/i.test(project.idea) ? ['Night'] : ['Story timeline progression'],
       damageState: 'Intact',
       soundSources: interior ? ['Room ambience', 'Fabric movement', 'Connected exterior bleed'] : ['Exterior ambience', 'Wind', 'Movement over terrain'],
       characterAccessPoints: interior ? ['Primary entrance', 'Connected exterior'] : ['Approach path', 'Departure path'],
@@ -796,7 +897,7 @@ function makeEnvironments(project: Pick<StudioProject, 'assets' | 'idea' | 'ligh
     weather: /rain/i.test(project.idea) ? 'Rain' : /snow/i.test(project.idea) ? 'Snow' : /desert/i.test(project.idea) ? 'Dry with variable wind' : 'Story-defined weather',
     atmosphere: [/dust|desert/i.test(project.idea) ? 'Dust' : 'Clear atmosphere', /fog/i.test(project.idea) ? 'Fog' : 'Visibility controlled by story'],
     wind: /desert|wind/i.test(project.idea) ? 'Variable wind with trackable direction' : 'Low unless changed by an event',
-    visibility: /night|dark/i.test(project.idea) ? 'Night-limited visibility' : 'Normal story visibility',
+    visibility: /sunrise|dawn/i.test(project.idea) ? 'Low dawn visibility progressing into direct sunrise' : /night|dark/i.test(project.idea) ? 'Night-limited visibility' : 'Normal story visibility',
     surfaceConditions: [/desert/i.test(project.idea) ? 'Dry sand' : 'Location-defined surface', 'Footprints and tracks persist until erased by a recorded event'],
     vegetationState: /desert/i.test(project.idea) ? 'Sparse and dry' : 'World Bible default',
     fireState: /fire|camp/i.test(project.idea) ? 'Potential practical fire; exact state recorded per sequence' : 'None',
@@ -804,7 +905,7 @@ function makeEnvironments(project: Pick<StudioProject, 'assets' | 'idea' | 'ligh
     debris: [],
     tracks: [],
     lighting: project.lightingDirection,
-    timeOfDay: /night|dark/i.test(project.idea) ? 'Night' : 'Story-defined progression',
+    timeOfDay: /sunrise|dawn/i.test(project.idea) ? 'Sunrise progression' : /night|dark/i.test(project.idea) ? 'Night' : 'Story-defined progression',
     sound: [/desert/i.test(project.idea) ? 'Wind over sand' : 'Location ambience', 'All sound sources must map to a physical or defined non-diegetic source'],
     activeFromSequence: 1,
     activeThroughSequence: project.sequenceCount,
@@ -1022,20 +1123,8 @@ export function createProjectFromIdea(idea: string): StudioProject {
   const durationSeconds = inferDurationSeconds(idea);
   const sequenceDurationSeconds = 30;
   const sequenceCount = Math.ceil(durationSeconds / sequenceDurationSeconds);
-  const protagonist = /traveller|traveler/i.test(idea) ? 'The Traveller' : 'The protagonist';
   const title = inferTitle(idea);
-  const story = {
-    version: 1,
-    status: 'Draft' as const,
-    logline: `${protagonist} enters ${setting.toLowerCase()} and faces a discovery that turns the journey into a test of survival and resolve.`,
-    protagonist,
-    conflict: `A clear outward obstacle forces ${protagonist.toLowerCase()} to confront an escalating personal and physical threat.`,
-    beginning: `Establish ${protagonist.toLowerCase()}, the journey, the world’s normal rules, and the first unease.`,
-    escalation: 'Each sequence narrows the available choices while revealing a new consequence of the central mystery.',
-    midpoint: 'The apparent explanation collapses, making the threat immediate and personal.',
-    climax: `${protagonist} must act with incomplete information as the visual and emotional continuity converge.`,
-    ending: 'Resolve the immediate action while leaving a final image that feels earned by every earlier sequence.',
-  };
+  const story = makeStoryFromIdea(idea);
   const filmBible = {
     version: 1,
     status: 'Draft' as const,
@@ -1075,7 +1164,17 @@ export function createProjectFromIdea(idea: string): StudioProject {
     knowledgeGraph: { nodes: [], edges: [] },
     stateEvents: [],
     stage: 'Story' as const, currentSequence: 1, exportStatus: 'Not exported', attachments: [],
-    settings: { automaticMode: true, imageProvider: 'Not connected', videoProvider: 'Not connected', defaultAspectRatio: '16:9', defaultResolution: '4K', privacyMode: true },
+    settings: {
+      automaticMode: true,
+      approvalMode: 'automatic',
+      pipelineApprovalGranted: false,
+      automaticPaidGeneration: false,
+      imageProvider: 'Not connected',
+      videoProvider: 'Not connected',
+      defaultAspectRatio: '16:9',
+      defaultResolution: '4K',
+      privacyMode: true,
+    },
   };
   projectBase.assets = makeAssets(idea, sequenceCount, setting);
   projectBase.flatAssetFolder.nextUnusedNumber = projectBase.assets.length + 1;
@@ -1090,6 +1189,17 @@ export function createProjectFromIdea(idea: string): StudioProject {
 export function normalizeProject(project: StudioProject): StudioProject {
   const next = structuredClone(project) as StudioProject;
   next.storageRevision = Number.isInteger(next.storageRevision) ? next.storageRevision : 0;
+  next.settings = {
+    automaticMode: next.settings?.automaticMode ?? true,
+    approvalMode: next.settings?.approvalMode ?? (next.settings?.automaticMode === false ? 'manual' : 'automatic'),
+    pipelineApprovalGranted: next.settings?.pipelineApprovalGranted ?? false,
+    automaticPaidGeneration: next.settings?.automaticPaidGeneration ?? false,
+    imageProvider: next.settings?.imageProvider ?? 'Not connected',
+    videoProvider: next.settings?.videoProvider ?? 'Not connected',
+    defaultAspectRatio: next.settings?.defaultAspectRatio ?? '16:9',
+    defaultResolution: next.settings?.defaultResolution ?? '4K',
+    privacyMode: next.settings?.privacyMode ?? true,
+  };
   const fallbackVisualStyle = next.visualStyle ?? 'Grounded cinematic realism with coherent production design';
   const fallbackLighting = next.lightingDirection ?? 'Motivated naturalistic light with consistent direction';
   next.worldBible ??= makeWorldBible({
@@ -1176,6 +1286,7 @@ export function normalizeProject(project: StudioProject): StudioProject {
     roleOverrides: attachment.roleOverrides ?? [],
     excludedTraits: attachment.excludedTraits ?? [],
     linkedAssetNumber: attachment.linkedAssetNumber ?? (attachment.linkedAssetId ? assetNumbers.get(attachment.linkedAssetId) : undefined),
+    identityGroupId: attachment.identityGroupId ?? (attachment.linkedAssetId === 'CHARACTER_001' ? 'CHARACTER_IDENTITY_001' : undefined),
   }));
   const previousSequences = new Map((next.sequences ?? []).map((sequence) => [sequence.id, sequence]));
   const regenerated = makeSequences({ ...next, sequences: undefined, production: undefined } as unknown as Omit<StudioProject, 'sequences' | 'production'>);
@@ -1253,7 +1364,7 @@ function message(content: string, metadata?: StudioMessage['metadata']): StudioM
 function decisionPinTarget(project: StudioProject, input: string): Omit<DecisionPin, 'id' | 'status' | 'approvedByUser' | 'createdAt' | 'releasedAt'> | null {
   const lower = input.toLowerCase();
   const number = Number(lower.match(/asset\s*0*(\d+)/)?.[1] ?? 0);
-  const sequenceNumber = Number(lower.match(/sequence\s*0*(\d+)/)?.[1] ?? project.currentSequence);
+  const sequenceNumber = Number(lower.match(/sequence[\s_-]*0*(\d+)/)?.[1] ?? project.currentSequence);
   const explicitAsset = number ? project.assets.find((asset) => asset.projectNumber === number) : undefined;
   const sequence = project.sequences.find((item) => item.number === sequenceNumber);
   if (/character identity|face identity|likeness/.test(lower)) {
@@ -1283,8 +1394,11 @@ function decisionPinTarget(project: StudioProject, input: string): Omit<Decision
   return null;
 }
 
-export function interpretStudioMessage(project: StudioProject, input: string): { project: StudioProject; response: StudioMessage; sideEffect?: 'export' | 'asset-export' } {
+export function interpretStudioMessage(project: StudioProject, input: string, options?: { preferredAttachmentId?: string }): { project: StudioProject; response: StudioMessage; sideEffect?: 'export' | 'asset-export' } {
   const next = normalizeProject(project);
+  const preferredAttachment = options?.preferredAttachmentId
+    ? next.attachments.find((attachment) => attachment.id === options.preferredAttachmentId)
+    : undefined;
   const lower = input.trim().toLowerCase();
   next.updatedAt = nowIso();
   buildRelevantProjectContext(next, input);
@@ -1306,7 +1420,7 @@ export function interpretStudioMessage(project: StudioProject, input: string): {
   }
 
   const requestedDuration = inferDurationSeconds(input, 0);
-  if (requestedDuration > 0 && /(make it|change|duration|movie|minute)/.test(lower)) {
+  if (requestedDuration > 0 && /(?:\b(?:make|change|set|shorten|extend)\b.{0,40}\b(?:duration|runtime|minutes?|seconds?|movie length)\b)|(?:\b(?:duration|runtime)\b.{0,30}\b\d+)/.test(lower)) {
     const lockedStory = next.production.storyLock.status === 'Locked';
     rebuildSequences(next, requestedDuration);
     next.story.version += 1;
@@ -1318,10 +1432,72 @@ export function interpretStudioMessage(project: StudioProject, input: string): {
     return { project: next, response: message(`The movie is now ${requestedDuration / 60} minutes: ${next.sequenceCount} sequences at 30 seconds${requestedDuration % 30 ? ', with a shorter final sequence' : ''}. I kept the prior version and marked the story, World Bible, Film Bible, timing plans, prompts, costs, look-ahead plan, and scene states for review.${lockedStory ? ' Approved production baselines remain active until replacement revisions are approved.' : ''}`, { kind: 'readiness' }) };
   }
 
+  if (/approve and continue automatically|automatic production|continue automatically/.test(lower)) {
+    next.settings.approvalMode = 'automatic';
+    next.settings.automaticMode = true;
+    next.settings.pipelineApprovalGranted = true;
+    next.story.status = 'Approved';
+    next.worldBible.status = 'Approved';
+    next.filmBible.status = 'Approved';
+    next.stage = 'Assets';
+    resolveDependencyTarget(next, 'WORLD_BIBLE', `World Bible v${next.worldBible.version} included in automatic production approval.`);
+    resolveDependencyTarget(next, 'FILM_BIBLE', `Film Bible v${next.filmBible.version} included in automatic production approval.`);
+    refreshProductionSystem(next);
+    return { project: next, response: message(`Automatic Production is active. I approved the story and its complete non-paid production plan once, including the World Bible, Film Bible, asset discovery, scenario planning, sequence planning, reference mapping, continuity preparation, and Seedance prompt preparation. I will keep showing each result in chat and pause for missing references or any image/video provider action. Paid generation is still off.`, { kind: 'approval' }) };
+  }
+
+  if (/master approval|approve (?:the )?(?:complete|whole|full) (?:movie )?(?:production )?plan/.test(lower)) {
+    next.settings.approvalMode = 'master';
+    next.settings.automaticMode = false;
+    next.settings.pipelineApprovalGranted = true;
+    next.story.status = 'Approved';
+    next.worldBible.status = 'Approved';
+    next.filmBible.status = 'Approved';
+    next.stage = 'Assets';
+    resolveDependencyTarget(next, 'WORLD_BIBLE', `World Bible v${next.worldBible.version} included in master approval.`);
+    resolveDependencyTarget(next, 'FILM_BIBLE', `Film Bible v${next.filmBible.version} included in master approval.`);
+    refreshProductionSystem(next);
+    return { project: next, response: message(`Master Approval is recorded for the complete non-paid movie production plan. I will use that one approval for story structure, both Bibles, asset discovery, scenarios, sequence plans, reference mapping, continuity preparation, and prompts. Image and video generation remain separately protected and require a clear request.`, { kind: 'approval' }) };
+  }
+
+  if (/manual approval|review each stage manually|manual production/.test(lower)) {
+    next.settings.approvalMode = 'manual';
+    next.settings.automaticMode = false;
+    next.settings.pipelineApprovalGranted = true;
+    refreshProductionSystem(next);
+    return { project: next, response: message(`Manual Approval is active. I will show each creative stage in chat and wait for its approval before advancing. Image and video generation still require an explicit request.`, { kind: 'approval' }) };
+  }
+
   if (/approve(?: the)? story|story approved/.test(lower)) {
     next.story.status = 'Approved';
     next.stage = 'World Bible';
     return { project: next, response: message(`Story approved. World Bible v${next.worldBible.version} now defines the geography, period, culture, technology, architecture, materials, climate, physical rules, and prohibited anachronisms for this production.`, { kind: 'world' }) };
+  }
+  if (/^(?:create|show) (?:me )?(?:the )?story\.?$/.test(lower)) {
+    return { project: next, response: message(`Story v${next.story.version} is ready here in the conversation.`, { kind: 'story' }) };
+  }
+  if (/regenerate (?:the )?story|try (?:the )?story again/.test(lower)) {
+    next.story.version += 1;
+    next.story.status = 'Draft';
+    next.worldBible.status = 'Draft';
+    next.filmBible.status = 'Draft';
+    next.settings.pipelineApprovalGranted = false;
+    markDependencyChange(next, 'STORY', `Story regenerated as version ${next.story.version}.`);
+    return { project: next, response: message(`Story v${next.story.version} is a fresh editable draft based on the same approved movie idea. No image, audio, or video generation was started.`, { kind: 'story' }) };
+  }
+  if (/regenerate (?:the )?world bible|try (?:the )?world bible again/.test(lower)) {
+    next.worldBible.version += 1;
+    next.worldBible.status = 'Draft';
+    next.settings.pipelineApprovalGranted = false;
+    markDependencyChange(next, 'WORLD_BIBLE', `World Bible regenerated as version ${next.worldBible.version}.`);
+    return { project: next, response: message(`World Bible v${next.worldBible.version} is a fresh editable production document. Dependent plans are marked for review; no image or video generation was started.`, { kind: 'world' }) };
+  }
+  if (/regenerate (?:the )?film bible|try (?:the )?film bible again/.test(lower)) {
+    next.filmBible.version += 1;
+    next.filmBible.status = 'Draft';
+    next.settings.pipelineApprovalGranted = false;
+    markDependencyChange(next, 'FILM_BIBLE', `Film Bible regenerated as version ${next.filmBible.version}.`);
+    return { project: next, response: message(`Film Bible v${next.filmBible.version} is a fresh editable production document. Dependent plans are marked for review; no image or video generation was started.`, { kind: 'bible' }) };
   }
   if (/approve(?: the)? world bible|world bible approved|approve world/.test(lower)) {
     if (!canPerformProjectAction(next, 'approve-world')) return { project: next, response: message(`World Bible approval is not legal while the project is ${next.production.control.stateMachine.current}. Approve the story first; no state changed.`, { kind: 'control' }) };
@@ -1340,7 +1516,8 @@ export function interpretStudioMessage(project: StudioProject, input: string): {
     next.stage = 'Assets';
     return { project: next, response: message(`Film Bible approved. The complete production manifest contains ${next.assets.length} tracked assets across identity, location, interior, environment, furniture, object, costume, creature, animal, vehicle, mechanical, lighting, and effects categories as required by this story.`, { kind: 'assets', assetIds: next.assets.map((asset) => asset.id) }) };
   }
-  if (/use my (?:photo|picture|image)|main character reference|my likeness/.test(lower)) {
+  if (/use my (?:photo|picture|image)|main character(?:\s+likeness)?\s+references?|likeness references?|asset\s*0*1.*(?:image|likeness|reference)/.test(lower)
+    && !/(?:replace|change|update).*(?:reference|image)/.test(lower)) {
     const mainCharacter = next.assets.find((item) => item.id === 'CHARACTER_001');
     if (!mainCharacter) {
       return { project: next, response: message('The main character asset is not in the current manifest. I kept the instruction and marked the story for review.', { kind: 'note' }) };
@@ -1351,6 +1528,48 @@ export function interpretStudioMessage(project: StudioProject, input: string): {
     mainCharacter.approvalState = 'Needs Review';
     mainCharacter.notes = `${mainCharacter.referenceCount} likeness reference${mainCharacter.referenceCount === 1 ? '' : 's'} attached; character sheet approval is pending.`;
     return { project: next, response: message(`${mainCharacter.referenceCount} reference image${mainCharacter.referenceCount === 1 ? ' is' : 's are'} attached to one identity: ${assetProductionReference(mainCharacter)}. Coverage is tracked by face, profile, body, rear, costume, material, and continuity role without creating duplicate people or numbers.`, { kind: 'coverage', assetIds: [mainCharacter.id] }) };
+  }
+
+  if (/create (?:the )?(?:master )?character sheet|make (?:the )?(?:master )?character sheet|generate (?:the )?(?:master )?character sheet/.test(lower)) {
+    const mainCharacter = next.assets.find((item) => item.id === 'CHARACTER_001');
+    if (!mainCharacter) return { project: next, response: message('The story does not currently contain a main character identity to build into a sheet.', { kind: 'asset-generation' }) };
+    const sourceReferences = next.attachments.filter((attachment) => attachment.identityGroupId === 'CHARACTER_IDENTITY_001' && attachment.contentType.startsWith('image/'));
+    if (!sourceReferences.length) {
+      return { project: next, response: message(`Attach one or more main-character photographs in this chat first. I can work with fewer than four; additional angles simply improve identity coverage. The source photographs remain unnumbered references.`, { kind: 'asset-generation', assetIds: [mainCharacter.id] }) };
+    }
+    const panelCount = sourceReferences.length >= 4 ? 6 : sourceReferences.length >= 2 ? 4 : 3;
+    mainCharacter.sheet = {
+      kind: 'Master Character Sheet',
+      composite: true,
+      panelCount,
+      sourceReferenceIds: sourceReferences.map((attachment) => attachment.id),
+      generationStatus: mainCharacter.generatedAttachmentId ? 'Generated' : 'Prepared',
+      brief: `One coherent professional reference board for the same locked identity, using ${sourceReferences.length} source photograph${sourceReferences.length === 1 ? '' : 's'} to select approximately ${panelCount} useful views. Front, profile, three-quarter, full-body, rear, and face-detail views are panels inside one image when useful; panels never become separate assets. Preserve face identity, body proportions, age appearance, skin, hair, and permanent characteristics.`,
+    };
+    mainCharacter.notes = `${mainCharacter.sheet.brief} One file, one permanent asset number, no gallery of separate generated views.`;
+    return { project: next, response: message(`${sourceReferences.length} source photograph${sourceReferences.length === 1 ? '' : 's'} now contribute to one locked character identity. I prepared one composite Master Character Sheet for ${assetProductionReference(mainCharacter)}: one image file, one asset number, with approximately ${panelCount} production views arranged as panels on the same board. ${next.settings.imageProvider === 'Not connected' ? 'No image provider is connected, so I stopped at the ready generation brief and did not create fake media.' : 'This explicit request authorizes one image-generation job only; it never authorizes video.'}`, { kind: 'asset-generation', assetIds: [mainCharacter.id] }) };
+  }
+  const productionSheetMatch = lower.match(/(?:create|make|generate) (?:the )?(?:master )?(environment|location|interior|prop|costume|creature|animal|vehicle|weapon|transformation|mechanical|damage)(?: reference)? sheet/);
+  if (productionSheetMatch) {
+    const categoryByKind: Record<string, string[]> = {
+      environment: ['Environment States'], location: ['Locations'], interior: ['Interiors'], prop: ['Props'], costume: ['Costumes'],
+      creature: ['Creatures'], animal: ['Animals'], vehicle: ['Vehicles'], weapon: ['Weapons'], transformation: ['Transformation Sheets'],
+      mechanical: ['Mechanical Systems'], damage: ['Damage Sheets'],
+    };
+    const kind = productionSheetMatch[1];
+    const sheetAsset = next.assets.find((item) => categoryByKind[kind].includes(item.category) && item.lifecycleStatus === 'Active');
+    if (!sheetAsset) return { project: next, response: message(`No existing ${kind} production asset was discovered in this movie. Add the genuinely separate story element first; no asset number was reserved.`, { kind: 'asset-generation' }) };
+    const linkedReferences = next.attachments.filter((attachment) => attachment.linkedAssetId === sheetAsset.id && attachment.contentType.startsWith('image/'));
+    sheetAsset.sheet = {
+      kind: `${kind[0].toUpperCase()}${kind.slice(1)} Reference Sheet`,
+      composite: true,
+      panelCount: 4,
+      sourceReferenceIds: linkedReferences.map((attachment) => attachment.id),
+      generationStatus: sheetAsset.generatedAttachmentId ? 'Generated' : 'Prepared',
+      brief: `One coherent composed reference board for ${sheetAsset.name}. Use approximately four production views or details inside one image only when they belong to the same stable asset or state. Viewing angles and detail panels never receive separate numbers. A genuinely different state, costume, transformation, or damage condition remains a separately discovered production asset.`,
+    };
+    sheetAsset.notes = `${sheetAsset.sheet.brief} One file, one permanent asset number.`;
+    return { project: next, response: message(`I prepared one composite ${sheetAsset.sheet.kind} for ${assetProductionReference(sheetAsset)}. It remains one file and one permanent production asset; its panels do not increase the asset count. ${next.settings.imageProvider === 'Not connected' ? 'No image provider is connected, so this is a ready brief rather than fake generated media.' : 'This explicit request authorizes one image-generation job only and never authorizes video.'}`, { kind: 'asset-generation', assetIds: [sheetAsset.id] }) };
   }
   if (/approve all assets|lock all assets/.test(lower)) {
     if (!canPerformProjectAction(next, 'approve-assets')) return { project: next, response: message(`Asset approval is not legal while the project is ${next.production.control.stateMachine.current}. Complete the approved story, World Bible, and Film Bible first; no asset changed.`, { kind: 'control' }) };
@@ -1375,15 +1594,19 @@ export function interpretStudioMessage(project: StudioProject, input: string): {
     const descriptor = categories[key];
     const stableIndex = Math.max(0, ...next.assets.filter((item) => item.id.startsWith(`${descriptor.prefix}_`)).map((item) => Number(item.id.split('_').at(-1)) || 0)) + 1;
     const id = `${descriptor.prefix}_${String(stableIndex).padStart(3, '0')}`;
-    const requestedName = input.match(/\b(?:called|named)\s+["“]?([^"”.,]+?)(?:\s+(?:for|in)\s+sequence\s+\d+|$)/i)?.[1]?.trim();
+    const requestedName = input.match(/\b(?:called|named)\s+["“]?([^"”.,]+?)(?:\s+(?:for|in|from)\s+sequences?[\s_-]*\d+.*|$)/i)?.[1]?.trim();
     const name = requestedName || `${key[0].toUpperCase()}${key.slice(1)} ${stableIndex}`;
     const duplicate = findDuplicateAsset(next, name, input);
     if (duplicate && !/\b(?:separate|distinct|different|intentional duplicate)\b/i.test(input)) {
       return { project: next, response: message(`Possible duplicate detected before assigning a new permanent number: Asset ${formatAssetNumber(duplicate.asset.projectNumber)} — ${duplicate.asset.name} (${Math.round(duplicate.score * 100)}% semantic match). Reuse that asset, or explicitly say this is a separate distinct production element. No number was reserved.`, { kind: 'control', assetIds: [duplicate.asset.id] }) };
     }
-    const mentionedSequence = Number(lower.match(/sequence\s*(\d+)/)?.[1] ?? 0);
-    const sequences = mentionedSequence > 0 && mentionedSequence <= next.sequenceCount
-      ? [mentionedSequence]
+    const sequenceRange = lower.match(/sequences?[\s_-]*0*(\d+)\s*(?:-|to|through)\s*0*(\d+)/);
+    const sequenceOnward = lower.match(/(?:from\s+)?sequence[\s_-]*0*(\d+)\s+(?:onward|onwards|through\s+the\s+end)/);
+    const mentionedSequence = Number(lower.match(/sequence[\s_-]*0*(\d+)/)?.[1] ?? 0);
+    const rangeStart = Math.max(1, Number(sequenceRange?.[1] ?? sequenceOnward?.[1] ?? mentionedSequence));
+    const rangeEnd = Math.min(next.sequenceCount, Number(sequenceRange?.[2] ?? (sequenceOnward ? next.sequenceCount : mentionedSequence)));
+    const sequences = rangeStart > 0 && rangeEnd >= rangeStart
+      ? Array.from({ length: rangeEnd - rangeStart + 1 }, (_, index) => rangeStart + index)
       : Array.from({ length: next.sequenceCount }, (_, index) => index + 1);
     const projectNumber = next.flatAssetFolder.nextUnusedNumber;
     const created: StudioAsset = {
@@ -1426,6 +1649,54 @@ export function interpretStudioMessage(project: StudioProject, input: string): {
   }
 
   const asset = findAsset(next, input);
+  if (asset && /(?:use|attach|accept).*(?:latest|last) attachment.*(?:generated|master|sheet|result)|(?:generated|master|sheet|result).*(?:latest|last) attachment/.test(lower)) {
+    const attachment = preferredAttachment ?? next.attachments.at(-1);
+    if (!attachment || !attachment.contentType.startsWith('image/')) return { project: next, response: message(`Attach the generated visual for Asset ${formatAssetNumber(asset.projectNumber)} first. The asset and its current approved version remain unchanged.`, { kind: 'control', assetIds: [asset.id] }) };
+    const replacingGeneratedMedia = Boolean(asset.generatedAttachmentId && asset.generatedAttachmentId !== attachment.id);
+    if (replacingGeneratedMedia) asset.version += 1;
+    asset.generatedAttachmentId = attachment.id;
+    if (asset.sheet) asset.sheet.generationStatus = 'Generated';
+    asset.approvalState = 'Needs Review';
+    asset.lockState = 'Unlocked';
+    asset.notes = `Generated visual version ${asset.version} stored from ${attachment.name}; approval pending.`;
+    attachment.linkedAssetId = asset.id;
+    attachment.linkedAssetNumber = asset.projectNumber;
+    markDependencyChange(next, asset.id, `${assetProductionReference(asset)} received generated visual ${attachment.name} for version ${asset.version}.`);
+    refreshProductionSystem(next);
+    return { project: next, response: message(`“${attachment.name}” is stored as generated version ${asset.version} for ${assetProductionReference(asset)}. The permanent number and filename remain fixed. Review and approve this version before it can enter the flat asset folder or a Seedance reference package.`, { kind: 'assets', assetIds: [asset.id] }) };
+  }
+
+  const costumeSwapForward = lower.match(/(?:from\s+)?sequence[\s_-]*0*(\d+)\s+(?:onward|onwards|through\s+the\s+end).*replace(?:\s+costume)?\s+asset\s*0*(\d+)\s+with\s+asset\s*0*(\d+)/);
+  const costumeSwapTrailing = lower.match(/replace(?:\s+costume)?\s+asset\s*0*(\d+)\s+with\s+asset\s*0*(\d+)\s+(?:from\s+)?sequence[\s_-]*0*(\d+)\s+(?:onward|onwards|through\s+the\s+end)/);
+  const costumeSwap = costumeSwapForward ?? costumeSwapTrailing;
+  if (costumeSwap) {
+    const start = Number(costumeSwapForward?.[1] ?? costumeSwapTrailing?.[3]);
+    const previousCostume = next.assets.find((item) => item.projectNumber === Number(costumeSwapForward?.[2] ?? costumeSwapTrailing?.[1]));
+    const replacementCostume = next.assets.find((item) => item.projectNumber === Number(costumeSwapForward?.[3] ?? costumeSwapTrailing?.[2]));
+    if (!previousCostume || !replacementCostume || previousCostume.category !== 'Costumes' || replacementCostume.category !== 'Costumes' || start < 1 || start > next.sequenceCount) {
+      return { project: next, response: message('A costume change needs two valid numbered costume assets and a valid starting sequence. No continuity state changed.', { kind: 'control' }) };
+    }
+    const affected = Array.from({ length: next.sequenceCount - start + 1 }, (_, index) => start + index);
+    previousCostume.sequences = previousCostume.sequences.filter((number) => number < start);
+    replacementCostume.sequences = [...new Set([...replacementCostume.sequences, ...affected])].sort((a, b) => a - b);
+    const priorSequences = new Map(next.sequences.map((item) => [item.id, item]));
+    next.sequences = makeSequences(next).map((item) => {
+      const prior = priorSequences.get(item.id);
+      if (!prior) return item;
+      return {
+        ...item,
+        status: item.number >= start ? 'Needs Review' : prior.status,
+        version: item.number >= start ? prior.version + 1 : prior.version,
+        continuitySource: prior.continuitySource,
+        openingState: prior.openingState,
+        closingState: prior.closingState,
+      };
+    });
+    markDependencyChange(next, previousCostume.id, `${assetProductionReference(previousCostume)} is replaced by ${assetProductionReference(replacementCostume)} from Sequence ${start} onward.`);
+    markDependencyChange(next, replacementCostume.id, `${assetProductionReference(replacementCostume)} becomes the current costume from Sequence ${start} onward.`);
+    refreshProductionSystem(next);
+    return { project: next, response: message(`Costume continuity now changes at Sequence ${start}: ${assetProductionReference(previousCostume)} remains assigned only before the change, and ${assetProductionReference(replacementCostume)} is assigned from Sequence ${start} through Sequence ${next.sequenceCount}. Character identity remains Asset 001; later scenarios, dialogue bindings, numbered reference packages, prompts, and continuity were marked for review.`, { kind: 'scene', sequenceNumber: start, assetIds: [previousCostume.id, replacementCostume.id] }) };
+  }
   if (asset && /(?:remove|write out).*(?:from (?:the )?(?:active )?(?:story|sequences)|no longer appears)/.test(lower)) {
     asset.sequences = [];
     for (const sequenceItem of next.sequences) {
@@ -1449,7 +1720,7 @@ export function interpretStudioMessage(project: StudioProject, input: string): {
     }
   }
   if (asset && /(?:replace|change|update).*(?:reference|image).*(?:latest|last) attachment/.test(lower)) {
-    const attachment = next.attachments.at(-1);
+    const attachment = preferredAttachment ?? next.attachments.at(-1);
     if (!attachment || !attachment.contentType.startsWith('image/')) return { project: next, response: message(`Attach the replacement visual reference first. Asset ${formatAssetNumber(asset.projectNumber)} remains unchanged.`, { kind: 'control', assetIds: [asset.id] }) };
     const affectedSequenceNumbers = next.sequences.filter((item) => item.assetIds.includes(asset.id)).map((item) => item.number);
     const affectedAssetIds = next.production.dependencies.filter((item) => item.sourceId === asset.id && item.targetType === 'Asset').map((item) => item.targetId);
@@ -1518,7 +1789,7 @@ export function interpretStudioMessage(project: StudioProject, input: string): {
   if (/show (?:me )?(?:all )?environments|environment states|weather states/.test(lower)) {
     return { project: next, response: message(`${next.environments.length} environment state${next.environments.length === 1 ? '' : 's'} are separated from permanent location identity. They track weather, atmosphere, wind, visibility, surfaces, vegetation, fire, water, debris, tracks, lighting, time, and physical sound sources.`, { kind: 'world' }) };
   }
-  if (/show (?:me )?(?:all )?assets|how many assets|asset manifest|\/assets/.test(lower)) {
+  if (/show (?:me )?(?:all )?assets|how many assets|asset manifest|create all required assets|discover all required assets|\/assets/.test(lower)) {
     const counts = Object.entries(next.assets.reduce<Record<string, number>>((acc, item) => { acc[item.category] = (acc[item.category] ?? 0) + 1; return acc; }, {}));
     return { project: next, response: message(`${next.assets.length} permanently numbered assets in ${next.flatAssetFolder.folderName}, from Asset ${formatAssetNumber(next.assets[0]?.projectNumber ?? 0)} through Asset ${formatAssetNumber(next.assets.at(-1)?.projectNumber ?? 0)}: ${counts.map(([category, count]) => `${count} ${category.toLowerCase()}`).join(', ')}. All categories share this one sequence.`, { kind: 'assets', assetIds: next.assets.map((item) => item.id) }) };
   }
@@ -1528,7 +1799,7 @@ export function interpretStudioMessage(project: StudioProject, input: string): {
     return { project: next, response: message(orphaned.length ? `${orphaned.length} active orphaned asset${orphaned.length === 1 ? '' : 's'} detected: ${orphaned.map((finding) => `Asset ${formatAssetNumber(finding.assetNumber)} ${finding.name}`).join(', ')}. Nothing was deleted or renumbered; retire or reconnect each asset explicitly.` : 'No active orphaned assets were found. Every active asset is connected to at least one sequence; retired numbers remain reserved.', { kind: 'control', assetIds: orphaned.map((finding) => finding.assetId) }) };
   }
 
-  const latestAttachment = next.attachments.at(-1);
+  const latestAttachment = preferredAttachment ?? next.attachments.at(-1);
   const onlyRole = input.match(/use (?:this|the latest attachment|latest attachment) only for (face identity|identity|face|clothing|costume|location|pose|style|body|profile)/i)?.[1];
   if (latestAttachment && onlyRole) {
     const roleMap: Record<string, string> = { 'face identity': 'Face identity', identity: 'Identity', face: 'Face', clothing: 'Costume', costume: 'Costume', location: 'Location', pose: 'Pose', style: 'Style', body: 'Body', profile: 'Profile' };
@@ -1551,7 +1822,7 @@ export function interpretStudioMessage(project: StudioProject, input: string): {
 
   if (/compare .*versions?|side by side/.test(lower)) {
     const assetNumber = Number(lower.match(/asset\s*0*(\d+)/)?.[1] ?? 0);
-    const comparedSequence = Number(lower.match(/sequence\s*0*(\d+)/)?.[1] ?? 0);
+    const comparedSequence = Number(lower.match(/sequence[\s_-]*0*(\d+)/)?.[1] ?? 0);
     const comparison = assetNumber
       ? next.production.control.comparisons.assets.find((item) => next.assets.find((assetItem) => assetItem.projectNumber === assetNumber)?.id === item.targetId)
       : next.production.control.comparisons.sequences.find((item) => item.targetId === `SEQUENCE_${String(comparedSequence).padStart(3, '0')}`);
@@ -1587,7 +1858,7 @@ export function interpretStudioMessage(project: StudioProject, input: string): {
     return { project: next, response: message(`${unready.length} critical or location-anchor assets still need approval. Look-ahead has identified ${future.length} future production requirements before their first sequence.`, { kind: 'lookahead', assetIds: unready.map((item) => item.id), sequenceNumber: next.currentSequence }) };
   }
 
-  const sequenceNumber = Number(lower.match(/sequence\s*(\d+)/)?.[1] ?? 0);
+  const sequenceNumber = Number(lower.match(/sequence[\s_-]*0*(\d+)/)?.[1] ?? 0);
   const sequence = next.sequences.find((item) => item.number === sequenceNumber);
   const referenceLimit = Number(lower.match(/(?:seedance|model|provider)?\s*reference(?: image)? limit\s*(?:to|is|=)?\s*(\d+)/)?.[1] ?? 0);
   if (referenceLimit > 0) {
@@ -1722,9 +1993,30 @@ export function interpretStudioMessage(project: StudioProject, input: string): {
     addDialogueLine(next, sequence, asset, exactDialogue);
     return { project: next, response: message(`${assetProductionReference(asset)} now owns the exact line “${exactDialogue}” in ${sequence.id}. Turn order, language, dialect, emotion, expression, timing, physical action, addressee, reactions, current costume, and approved visual bindings are stored with the line. Seedance generates the spoken result inside the video; no separate sound asset is created.`, { kind: 'dialogue', sequenceNumber: sequence.number, assetIds: [asset.id] }) };
   }
-  if (sequence && /structured scenario|scenario engine|show scenario|scenario plan/.test(lower)) {
+  if (sequence && /regenerate.*(?:script|screenplay)|(?:script|screenplay).*regenerate/.test(lower)) {
     const plan = next.production.sequencePlans[sequence.id];
-    return { project: next, response: message(`${sequence.id} scenario is ${plan.scenario.purposeCategory.toLowerCase()} at escalation ${plan.scenario.escalationScore}%. It stores purpose, location/time, opening, ${plan.scenario.actions.length} actor-owned actions, ${plan.dialogue.length} exact dialogue lines, reactions, camera progression, environment activity, state delta, transition, ending, and connection to the next sequence.`, { kind: 'sequence', sequenceNumber: sequence.number }) };
+    plan.revision += 1;
+    plan.lockState = 'Needs Review';
+    plan.freshness = 'Needs Review';
+    plan.revisions.push({ revision: plan.revision, label: `V${String(plan.revision).padStart(2, '0')}`, status: 'Needs Review', createdAt: nowIso(), reason: 'Script regenerated through chat.', prompt: plan.compiledPrompt, assetNumbers: sequence.assetNumbers });
+    if (sequence.status === 'Approved') sequence.status = 'Needs Review';
+    return { project: next, response: message(`${sequence.id} script v${plan.revision} is a fresh editable document. No provider job was created.`, { kind: 'script', sequenceNumber: sequence.number }) };
+  }
+  if (sequence && /(?:show|create|write).*(?:script|screenplay)/.test(lower)) {
+    return { project: next, response: message(`${sequence.id} script is ready as a clean expandable document with its complete action and exact dialogue speaker bindings.`, { kind: 'script', sequenceNumber: sequence.number }) };
+  }
+  if (sequence && /regenerate.*scenario|scenario.*regenerate/.test(lower)) {
+    const plan = next.production.sequencePlans[sequence.id];
+    plan.revision += 1;
+    plan.lockState = 'Needs Review';
+    plan.freshness = 'Needs Review';
+    plan.revisions.push({ revision: plan.revision, label: `V${String(plan.revision).padStart(2, '0')}`, status: 'Needs Review', createdAt: nowIso(), reason: 'Scenario regenerated through chat.', prompt: plan.compiledPrompt, assetNumbers: sequence.assetNumbers });
+    if (sequence.status === 'Approved') sequence.status = 'Needs Review';
+    return { project: next, response: message(`${sequence.id} scenario v${plan.revision} is a fresh editable document with the same exact identity and dialogue bindings. No provider job was created.`, { kind: 'scenario', sequenceNumber: sequence.number }) };
+  }
+  if (sequence && /structured scenario|scenario engine|show scenario|scenario plan|create.*scenario|write.*scenario/.test(lower)) {
+    const plan = next.production.sequencePlans[sequence.id];
+    return { project: next, response: message(`${sequence.id} scenario is ${plan.scenario.purposeCategory.toLowerCase()} at escalation ${plan.scenario.escalationScore}%. It stores purpose, location/time, opening, ${plan.scenario.actions.length} actor-owned actions, ${plan.dialogue.length} exact dialogue lines, reactions, camera progression, environment activity, state delta, transition, ending, and connection to the next sequence.`, { kind: 'scenario', sequenceNumber: sequence.number }) };
   }
   if (sequence && /generation readiness|readiness check|what.*blocking/.test(lower)) {
     const checklist = next.production.sequencePlans[sequence.id].readinessChecklist;
@@ -1739,13 +2031,13 @@ export function interpretStudioMessage(project: StudioProject, input: string): {
     return { project: next, response: message(`${sequence.id} reference package is ${plan.referencePackage.freshness.toLowerCase()}. ${plan.referencePackage.uploadInstruction} Upload order is deliberate; provider-limit retention prioritizes the previous continuity frame, dialogue speakers, permanent identities, current appearance, costumes, location, and critical props. Every file keeps its permanent project number.`, { kind: 'reference-package', sequenceNumber: sequence.number }) };
   }
   if (sequence && /use.*(?:latest|last) attachment.*(?:(?:generated|generation|video|sequence).*)?result|(?:generated|generation|video).*result.*(?:latest|last) attachment/.test(lower)) {
-    const attachment = next.attachments.at(-1);
+    const attachment = preferredAttachment ?? next.attachments.at(-1);
     if (!attachment || !attachment.contentType.startsWith('video/')) return { project: next, response: message(`Attach the generated video first, then say “Use latest attachment as ${sequence.id} result.”`, { kind: 'validation', sequenceNumber: sequence.number }) };
     const job = registerGeneratedSequenceResult(next, sequence, attachment.id);
     return { project: next, response: message(`“${attachment.name}” is stored as ${sequence.id}’s generated result for snapshot ${job.generationSnapshotId}. Its first-frame comparison key and last-frame continuity key were created automatically; the continuity frame stays outside the numbered visual-asset folder and will be used by the next sequence when required.`, { kind: 'validation', sequenceNumber: sequence.number }) };
   }
   if (sequence && /(?:latest|last) attachment.*last frame|use.*attachment.*last frame/.test(lower)) {
-    const attachment = next.attachments.at(-1);
+    const attachment = preferredAttachment ?? next.attachments.at(-1);
     if (!attachment) return { project: next, response: message(`Attach the extracted ending frame first, then identify it as ${sequence.id}’s last frame.`, { kind: 'reference-package', sequenceNumber: sequence.number }) };
     const key = `reference:${attachment.id}`;
     const plan = next.production.sequencePlans[sequence.id];
@@ -1855,6 +2147,9 @@ export function interpretStudioMessage(project: StudioProject, input: string): {
   }
   if (sequence && /prepare (?:an )?(?:external )?(?:seedance )?(?:package|workflow)/.test(lower)) {
     if (!canPerformProjectAction(next, 'prepare-generation')) return { project: next, response: message(`Generation preparation is not legal while the project is ${next.production.control.stateMachine.current}. Complete the state-machine blockers first; no prompt or paid request was created.`, { kind: 'control', sequenceNumber: sequence.number }) };
+    if (next.production.sequencePlans[sequence.id].readinessChecklist.readyForGeneration) {
+      resolveDependencyTarget(next, sequence.id, `${sequence.id} structured plan explicitly reviewed while preparing the current external package.`);
+    }
     const job = queueSequenceGeneration(next, sequence);
     if (next.production.sequencePlans[sequence.id].readinessChecklist.readyForGeneration) {
       job.status = 'External';
@@ -1863,7 +2158,17 @@ export function interpretStudioMessage(project: StudioProject, input: string): {
     const plan = next.production.sequencePlans[sequence.id];
     return { project: next, response: message(`${sequence.id} external Seedance package is ${job.status.toLowerCase()}. ${plan.referencePackage.uploadInstruction} Then paste the provider translation and generate outside the Studio. Attach the finished video here and say “Use latest attachment as ${sequence.id} result” to validate, approve, extract the ending-frame key, and continue.`, { kind: 'reference-package', sequenceNumber: sequence.number }) };
   }
-  if (sequence && /generate/.test(lower)) {
+  if (sequence && /regenerate.*(?:seedance )?prompt|(?:seedance )?prompt.*regenerate|^regenerate\s+(?:sequence|seq)[\s_-]*0*\d+/.test(lower)) {
+    const plan = next.production.sequencePlans[sequence.id];
+    plan.revision += 1;
+    plan.lockState = 'Needs Review';
+    plan.freshness = 'Needs Review';
+    plan.revisions.push({ revision: plan.revision, label: `V${String(plan.revision).padStart(2, '0')}`, status: 'Needs Review', createdAt: nowIso(), reason: /prompt/.test(lower) ? 'Seedance prompt regenerated through chat.' : 'Sequence plan regenerated through chat.', prompt: plan.compiledPrompt, assetNumbers: sequence.assetNumbers });
+    if (sequence.status === 'Approved') sequence.status = 'Needs Review';
+    const kind = /prompt/.test(lower) ? 'prompt' : 'sequence';
+    return { project: next, response: message(`${sequence.id} ${kind === 'prompt' ? 'Seedance prompt' : 'plan'} v${plan.revision} is a fresh editable document. Existing approved media remains preserved and no new image or video job was created.`, { kind, sequenceNumber: sequence.number }) };
+  }
+  if (sequence && /(?:^|\b)(?:generate|render)\b/.test(lower) && !/\bregenerate\b/.test(lower)) {
     if (!canPerformProjectAction(next, 'prepare-generation')) return { project: next, response: message(`Generation is blocked while the project is ${next.production.control.stateMachine.current}. The Studio will not jump past story, Bible, asset, or sequence readiness; no provider request or credit was created.`, { kind: 'control', sequenceNumber: sequence.number }) };
     const blockers: string[] = [];
     if (next.story.status !== 'Approved') blockers.push('story approval');
@@ -1873,15 +2178,17 @@ export function interpretStudioMessage(project: StudioProject, input: string): {
     if (pending.length) blockers.push(`${pending.length} locked reference asset${pending.length === 1 ? '' : 's'}`);
     blockers.push(...next.production.sequencePlans[sequence.id].readinessChecklist.blockers.filter((blocker) => !/visual references are not approved|provider reference limit is unknown/i.test(blocker)));
     if (blockers.length) return { project: next, response: message(`${sequence.id} is safe, but generation is blocked by ${blockers.join(', ')}. I kept its prompt and all existing work unchanged.`, { kind: 'sequence', sequenceNumber: sequence.number }) };
+    resolveDependencyTarget(next, sequence.id, `${sequence.id} structured plan explicitly reviewed while preparing the current generation attempt.`);
     const job = queueSequenceGeneration(next, sequence);
     next.stage = 'Generation';
     return { project: next, response: message(`${sequence.id} is prepared as ${job.id} and is ${job.status}. Cost protection: provider ${job.provider}; model ${job.model}; duration ${job.durationSeconds}s; resolution ${job.resolution}; sequence ${job.sequenceNumber}; estimated next attempt 1 credit. No credit has been used. Confirm or cancel after reviewing this summary.${job.failureMessage ? ` ${job.failureMessage}` : ''}`, { kind: 'queue', sequenceNumber: sequence.number }) };
   }
   if (sequence && /(show|prompt|seedance)/.test(lower)) {
     const plan = next.production.sequencePlans[sequence.id];
-    return { project: next, response: message(`${sequence.id} is ${sequence.status.toLowerCase()}. ${plan.referencePackage.uploadInstruction} The Seedance prompt is compiled from structured scenario, exact timing, character state, speaker bindings, actions, environment, props, camera, lighting, opening/ending frames, sound instructions, continuity, and restrictions.`, { kind: 'sequence', sequenceNumber: sequence.number }) };
+    const kind = /prompt|seedance/.test(lower) ? 'prompt' : 'sequence';
+    return { project: next, response: message(`${sequence.id} is ${sequence.status.toLowerCase()}. ${plan.referencePackage.uploadInstruction} The Seedance prompt is compiled from structured scenario, exact timing, character state, speaker bindings, actions, environment, props, camera, lighting, opening/ending frames, sound instructions, continuity, and restrictions.`, { kind, sequenceNumber: sequence.number }) };
   }
-  if (/show (?:me )?(?:all )?sequences|sequence plan|\/sequences/.test(lower)) {
+  if (/show (?:me )?(?:all )?sequences|sequence plan|create (?:all )?sequences|plan (?:all )?sequences|\/sequences/.test(lower)) {
     return { project: next, response: message(`${next.sequenceCount} sequences total. Each planned sequence stores exact permanent asset numbers, matching flat-folder filenames, opening and closing states, a continuity source, and a production-ready Seedance prompt.`, { kind: 'sequence', sequenceNumber: next.currentSequence }) };
   }
 
@@ -2072,8 +2379,47 @@ export function interpretStudioMessage(project: StudioProject, input: string): {
   }
 
   if (/^continue\.?$|what(?:'s| is) next/.test(lower)) {
+    if (!next.settings.pipelineApprovalGranted) {
+      return { project: next, response: message(`Choose how I should continue through the non-paid production preparation: Automatic Production, one Master Approval, or Manual Approval. None of these choices authorizes image or video generation.`, { kind: 'approval' }) };
+    }
+    if (next.settings.approvalMode !== 'manual') {
+      if (next.story.status !== 'Approved' || next.worldBible.status !== 'Approved' || next.filmBible.status !== 'Approved') {
+        next.story.status = 'Approved';
+        next.worldBible.status = 'Approved';
+        next.filmBible.status = 'Approved';
+        next.stage = 'Assets';
+        refreshProductionSystem(next);
+        return { project: next, response: message(`The approved non-paid plan is current. The World Bible, Film Bible, complete asset discovery, scenarios, sequence plans, reference maps, continuity preparation, and Seedance prompts are ready to review in chat. No provider job was created.`, { kind: 'approval' }) };
+      }
+      const mainCharacter = next.assets.find((asset) => asset.id === 'CHARACTER_001');
+      if (mainCharacter && mainCharacter.referenceCount === 0) {
+        return { project: next, response: message(`The next useful step is identity coverage for the main character. Attach one or more photographs here and say “Use these as my main character.” Fewer than four works; four or more simply improves coverage. Source files stay unnumbered.`, { kind: 'asset-generation', assetIds: [mainCharacter.id] }) };
+      }
+      if (mainCharacter && !mainCharacter.generatedAttachmentId) {
+        return { project: next, response: message(`The main-character references are organized as one identity. Say “Create the master character sheet” when you want one composite image prepared. That explicit image request will create only one sheet asset and will never start video.`, { kind: 'asset-generation', assetIds: [mainCharacter.id] }) };
+      }
+      const nextUnapprovedAsset = next.assets.find((asset) => asset.lifecycleStatus === 'Active' && !asset.generatedAttachmentId);
+      if (nextUnapprovedAsset) {
+        return { project: next, response: message(`The complete numbered asset manifest is ready. ${assetProductionReference(nextUnapprovedAsset)} is the next visual sheet awaiting an explicit image-generation request or an imported generated master. Views inside a composed sheet never increase the asset count.`, { kind: 'assets', assetIds: next.assets.map((asset) => asset.id) }) };
+      }
+      const preparedSequence = next.sequences.find((sequenceItem) => sequenceItem.number === next.currentSequence) ?? next.sequences[0];
+      return { project: next, response: message(`${preparedSequence.id} is prepared as scenario, script, exact speaker/reference bindings, continuity instructions, and Seedance prompt. Nothing has been rendered. Say “Show ${preparedSequence.id}” or “Copy the Seedance prompt for ${preparedSequence.id}.” Video starts only if you explicitly say “Generate ${preparedSequence.id}.”`, { kind: 'sequence', sequenceNumber: preparedSequence.number }) };
+    }
     const kind: StudioMessage['metadata'] = { kind: next.production.currentPipelineStage === 'STORY' ? 'story' : next.production.currentPipelineStage === 'WORLD BIBLE' ? 'world' : next.production.currentPipelineStage === 'FILM BIBLE' ? 'bible' : next.production.currentPipelineStage === 'FINAL ASSEMBLY' ? 'assembly' : 'readiness', sequenceNumber: next.currentSequence };
     return { project: next, response: message(`${next.production.nextLogicalAction} Current readiness: ${next.production.readiness}.`, kind) };
+  }
+
+  if (/(?:^|\b)(?:rewrite|change|update)\s+(?:the\s+)?(?:story|premise)\b|\bpreserve this exact premise\b/.test(lower)) {
+    const replacement = makeStoryFromIdea(input, next.story.version + 1);
+    next.idea = approvedPremise(input);
+    next.story = replacement;
+    next.worldBible.version += 1;
+    next.worldBible.status = 'Draft';
+    next.filmBible.version += 1;
+    next.filmBible.status = 'Draft';
+    next.sequences.forEach((item) => { if (item.status === 'Approved') item.status = 'Needs Review'; });
+    markDependencyChange(next, 'STORY', `Approved premise replaced in Story v${replacement.version}: ${replacement.logline}`);
+    return { project: next, response: message(`Story v${replacement.version} now uses the revised premise verbatim: “${replacement.logline}” The protagonist, conflict, beginning, midpoint, climax, and ending were rebuilt from that premise. Existing approved versions and media remain preserved until the replacement production state is approved.`, { kind: 'story' }) };
   }
 
   next.story.version += 1;

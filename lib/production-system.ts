@@ -837,7 +837,13 @@ export function queueSequenceGeneration(project: StudioProject, sequence: Studio
   refreshProductionSystem(project);
   const plan = project.production.sequencePlans[sequence.id];
   const profile = project.production.modelCapabilities.find((item) => item.id === project.production.selectedCapabilityProfileId)!;
-  const stateHash = stableFingerprint(JSON.stringify({ scenario: plan.scenario, dialogue: plan.dialogue, references: plan.referencePackage.rankedReferences, prompt: plan.compiledPrompt, provider: profile.id, capabilityRevision: profile.capabilityRevision }));
+  const assetVersions = plan.referencePackage.rankedReferences
+    .filter((reference) => reference.assetId)
+    .map((reference) => project.assets.find((asset) => asset.id === reference.assetId))
+    .filter((asset): asset is StudioProject['assets'][number] => Boolean(asset))
+    .map((asset) => ({ assetId: asset.id, assetNumber: asset.projectNumber, version: asset.version, generatedAttachmentId: asset.generatedAttachmentId ?? null }))
+    .sort((a, b) => a.assetNumber - b.assetNumber);
+  const stateHash = stableFingerprint(JSON.stringify({ scenario: plan.scenario, dialogue: plan.dialogue, references: plan.referencePackage.rankedReferences, assetVersions, prompt: plan.compiledPrompt, provider: profile.id, capabilityRevision: profile.capabilityRevision }));
   const idempotencyKey = `${project.id}:${sequence.id}:v${plan.revision}:${stateHash}`;
   const existing = project.production.renderQueue.findLast((item) => item.idempotencyKey === idempotencyKey);
   if (existing) return existing;
@@ -853,6 +859,7 @@ export function queueSequenceGeneration(project: StudioProject, sequence: Studio
     scenario: structuredClone(plan.scenario), dialogue: structuredClone(plan.dialogue), referencePackageId: plan.referencePackage.packageId,
     selectedReferenceIds: plan.referencePackage.rankedReferences.filter((reference) => reference.included).sort((a, b) => a.uploadOrder - b.uploadOrder).map((reference) => reference.id),
     exactReferenceOrder: plan.referencePackage.rankedReferences.filter((reference) => reference.included).sort((a, b) => a.uploadOrder - b.uploadOrder).map((reference) => ({ id: reference.id, uploadOrder: reference.uploadOrder, fileName: reference.fileName })),
+    assetVersions,
     compiledPrompt: plan.compiledPrompt, structuredStateHash: stateHash, provider: profile.provider, model: profile.model, modelVersion: profile.modelVersion, capabilityRevision: profile.capabilityRevision,
     providerSettings: { durationSeconds: sequence.duration, resolution: project.resolution, maximumReferenceImages: profile.maximumReferenceImages }, dataSchemaVersion: project.production.schemaVersion,
     correctionRuleIds: project.production.correctionMemory.filter((rule) => rule.active && (rule.sequenceNumber === null || rule.sequenceNumber === sequence.number)).map((rule) => rule.id),

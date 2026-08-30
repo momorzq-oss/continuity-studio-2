@@ -8,6 +8,7 @@ import {
   type StudioMessage,
   type StudioProject,
 } from '@/lib/studio';
+import { decodeProjectState, encodeProjectState } from '@/lib/project-state-codec';
 
 export const runtime = 'edge';
 
@@ -28,7 +29,7 @@ async function loadProject(projectId: string) {
     .bind(projectId)
     .first<{ state_json: string; revision: number }>();
   if (!row) return null;
-  const project = normalizeProject(JSON.parse(row.state_json) as StudioProject);
+  const project = normalizeProject(await decodeProjectState<StudioProject>(row.state_json));
   project.storageRevision = row.revision;
   return project;
 }
@@ -54,7 +55,7 @@ async function listProjects() {
   const rows = await DB.prepare(
     'SELECT state_json FROM projects WHERE archived = 0 ORDER BY pinned DESC, updated_at DESC LIMIT 100',
   ).all<{ state_json: string }>();
-  return rows.results.map((row) => summarizeProject(normalizeProject(JSON.parse(row.state_json) as StudioProject)));
+  return Promise.all(rows.results.map(async (row) => summarizeProject(normalizeProject(await decodeProjectState<StudioProject>(row.state_json)))));
 }
 
 function messageInsert(projectId: string, item: StudioMessage) {
@@ -66,7 +67,20 @@ function messageInsert(projectId: string, item: StudioMessage) {
 
 async function runBatches(statements: D1PreparedStatement[]) {
   const { DB } = getRuntimeEnv();
-  if (statements.length) await DB.batch(statements);
+  // D1/SQLite imposes a bound-data ceiling on one batch. A feature-length
+  // project can legitimately contain many sequence plans, immutable snapshots,
+  // validations, and checkpoints, so resubmitting every derived database index
+  // in one request eventually fails with SQLITE_TOOBIG. Keep each batch small;
+  // every statement is an idempotent insert/upsert and the canonical state_json
+  // remains the database source of truth.
+  const maximumStatementsPerBatch = 16;
+  for (let start = 0; start < statements.length; start += maximumStatementsPerBatch) {
+    try {
+      await DB.batch(statements.slice(start, start + maximumStatementsPerBatch));
+    } catch (cause) {
+      throw new Error(`D1 persistence batch ${start / maximumStatementsPerBatch + 1} failed (${start}-${Math.min(statements.length, start + maximumStatementsPerBatch) - 1} of ${statements.length - 1}).`, { cause });
+    }
+  }
 }
 
 function intelligenceStatements(project: StudioProject) {
@@ -242,8 +256,8 @@ function intelligenceStatements(project: StudioProject) {
       .bind(pin.id, project.id, pin.targetType, pin.targetId, pin.field, pin.valueJson, pin.status, pin.createdAt, pin.releasedAt));
   }
   for (const attachment of project.attachments) {
-    statements.push(DB.prepare(`UPDATE asset_references SET reference_roles_json = ?, role_overrides_json = ?, excluded_traits_json = ?
-      WHERE id = ? AND project_id = ?`).bind(JSON.stringify(attachment.referenceRoles), JSON.stringify(attachment.roleOverrides ?? []), JSON.stringify(attachment.excludedTraits ?? []), attachment.id, project.id));
+    statements.push(DB.prepare(`UPDATE asset_references SET asset_id = COALESCE(?, asset_id), reference_roles_json = ?, role_overrides_json = ?, excluded_traits_json = ?
+      WHERE id = ? AND project_id = ?`).bind(attachment.linkedAssetId ? `${project.id}:${attachment.linkedAssetId}` : null, JSON.stringify(attachment.referenceRoles), JSON.stringify(attachment.roleOverrides ?? []), JSON.stringify(attachment.excludedTraits ?? []), attachment.id, project.id));
   }
   for (const warning of project.production.control.warnings) statements.push(productionRecord('production-warning', warning.id, warning.severity, null, warning));
   for (const confidence of project.production.control.relationshipConfidence) statements.push(productionRecord('relationship-confidence', confidence.id, confidence.reviewRequired ? 'Review' : 'Accepted', null, confidence));
@@ -266,15 +280,37 @@ async function resolveRollback(project: StudioProject, content: string) {
     const row = await DB.prepare('SELECT state_json, reason FROM project_recovery_snapshots WHERE project_id = ? ORDER BY created_at DESC LIMIT 1')
       .bind(project.id).first<{ state_json: string; reason: string }>();
     if (!row) return null;
-    const restored = normalizeProject(JSON.parse(row.state_json) as StudioProject);
+    const restored = normalizeProject(await decodeProjectState<StudioProject>(row.state_json));
     restored.storageRevision = project.storageRevision;
     restored.updatedAt = nowIso();
     return { project: restored, text: `Undid the last persisted project change using the recovery snapshot “${row.reason}”. Permanent asset and sequence numbers remain reserved.` };
   }
-  const sequenceVersion = content.match(/(?:go back to|restore)\s+sequence\s*0*(\d+)\s+(?:version|v)\s*0*(\d+)/i);
+  const sequenceVersion = content.match(/(?:go back to|restore)\s+sequence[\s_-]*0*(\d+)\s+(?:version|v)\s*0*(\d+)/i);
   if (sequenceVersion) {
     const number = Number(sequenceVersion[1]);
     const version = Number(sequenceVersion[2]);
+    const snapshots = await DB.prepare('SELECT state_json FROM project_recovery_snapshots WHERE project_id = ? ORDER BY created_at DESC LIMIT 200')
+      .bind(project.id).all<{ state_json: string }>();
+    let historicalProject: StudioProject | null = null;
+    for (const snapshot of snapshots.results) {
+      try {
+        const candidate = normalizeProject(await decodeProjectState<StudioProject>(snapshot.state_json));
+        if (candidate.sequences.some((sequence) => sequence.number === number && sequence.version === version)
+          && Boolean(candidate.production.sequencePlans[`SEQUENCE_${String(number).padStart(3, '0')}`])) {
+          historicalProject = candidate;
+          break;
+        }
+      } catch {
+        // Ignore an unreadable historical snapshot and continue to older ones.
+      }
+    }
+    if (historicalProject) {
+      const restoredSequence = historicalProject.sequences.find((sequence) => sequence.number === number)!;
+      project.sequences = project.sequences.map((sequence) => sequence.number === number ? structuredClone(restoredSequence) : sequence);
+      project.production.sequencePlans[restoredSequence.id] = structuredClone(historicalProject.production.sequencePlans[restoredSequence.id]);
+      project.updatedAt = nowIso();
+      return { project: normalizeProject(project), text: `Restored Sequence ${number} to version ${version}, including its structured scenario, exact dialogue, prompt, timing, and reference plan. Other sequences, permanent numbers, assets, and approved media remain unchanged; downstream dependencies were recalculated.` };
+    }
     const row = await DB.prepare(`SELECT sv.content_json FROM sequence_versions sv
       JOIN sequences s ON s.id = sv.sequence_id WHERE s.project_id = ? AND s.sequence_number = ? AND sv.version = ? LIMIT 1`)
       .bind(project.id, number, version).first<{ content_json: string }>();
@@ -282,13 +318,20 @@ async function resolveRollback(project: StudioProject, content: string) {
     const restoredSequence = JSON.parse(row.content_json) as StudioProject['sequences'][number];
     project.sequences = project.sequences.map((sequence) => sequence.number === number ? restoredSequence : sequence);
     project.updatedAt = nowIso();
-    return { project: normalizeProject(project), text: `Restored Sequence ${number} to version ${version}. Other sequences, permanent numbers, assets, and approved media remain unchanged; downstream dependencies were recalculated.` };
+    return { project: normalizeProject(project), text: `Restored Sequence ${number} to version ${version}. No matching full recovery snapshot existed, so the stored sequence record was restored and the current structured plan was recompiled. Other sequences, permanent numbers, assets, and approved media remain unchanged.` };
   }
   if (/restore (?:the )?previous costume/i.test(content)) {
     const rows = await DB.prepare('SELECT state_json FROM project_recovery_snapshots WHERE project_id = ? ORDER BY created_at DESC LIMIT 25')
       .bind(project.id).all<{ state_json: string }>();
     const current = JSON.stringify(project.assets.filter((asset) => asset.category === 'Costumes'));
-    const prior = rows.results.map((row) => JSON.parse(row.state_json) as StudioProject).find((snapshot) => JSON.stringify(snapshot.assets.filter((asset) => asset.category === 'Costumes')) !== current);
+    let prior: StudioProject | undefined;
+    for (const row of rows.results) {
+      const snapshot = await decodeProjectState<StudioProject>(row.state_json);
+      if (JSON.stringify(snapshot.assets.filter((asset) => asset.category === 'Costumes')) !== current) {
+        prior = snapshot;
+        break;
+      }
+    }
     if (!prior) return { project, text: 'No earlier costume state was found; nothing changed.' };
     const priorCostumes = new Map(prior.assets.filter((asset) => asset.category === 'Costumes').map((asset) => [asset.id, asset]));
     project.assets = project.assets.map((asset) => priorCostumes.get(asset.id) ?? asset);
@@ -302,6 +345,7 @@ async function createProjectGraph(project: StudioProject, messages: StudioMessag
   const { DB } = getRuntimeEnv();
   project.storageRevision = 1;
   const transactionId = crypto.randomUUID();
+  const encodedProject = await encodeProjectState(project);
   const statements: D1PreparedStatement[] = [
     DB.prepare(`INSERT INTO projects (
       id, title, duration_seconds, sequence_duration_seconds, sequence_count, genre,
@@ -312,7 +356,7 @@ async function createProjectGraph(project: StudioProject, messages: StudioMessag
       project.genre, project.story.status, project.filmBible.status, 'Planned', 'Planned', project.continuity.status,
       project.exportStatus, project.pinned ? 1 : 0, project.archived ? 1 : 0, project.production.control.dataSchema.currentVersion,
       project.production.control.stateMachine.current, project.production.control.exportIdentity.collisionSafeSlug,
-      JSON.stringify(project), project.createdAt, project.updatedAt,
+      encodedProject, project.createdAt, project.updatedAt,
     ),
     DB.prepare('INSERT INTO project_transactions (project_id, revision, last_transaction_id, updated_at) VALUES (?, ?, ?, ?)')
       .bind(project.id, project.storageRevision, transactionId, project.updatedAt),
@@ -374,12 +418,16 @@ async function persistProject(project: StudioProject, messages: StudioMessage[],
   const change = { id: `change_${crypto.randomUUID()}`, revision: nextRevision, scope, summary, createdAt: project.updatedAt };
   project.production.control.changeLog.push(change);
   const afterStateHash = `${JSON.stringify(project).length.toString(16)}-${project.updatedAt}`;
+  const [encodedBeforeProject, encodedProject] = await Promise.all([
+    encodeProjectState(beforeProject),
+    encodeProjectState(project),
+  ]);
   const statements: D1PreparedStatement[] = [
     DB.prepare(`INSERT INTO transaction_guards (id, project_id, revision_ok, created_at)
       SELECT ?, ?, CASE WHEN revision = ? THEN 1 ELSE 0 END, ? FROM project_transactions WHERE project_id = ?`)
       .bind(transactionId, project.id, expectedRevision, project.updatedAt, project.id),
     DB.prepare('INSERT INTO project_recovery_snapshots (id, project_id, reason, state_json, created_at) VALUES (?, ?, ?, ?, ?)')
-      .bind(snapshotId, project.id, summary, JSON.stringify(beforeProject), project.updatedAt),
+      .bind(snapshotId, project.id, summary, encodedBeforeProject, project.updatedAt),
     DB.prepare(`UPDATE projects SET
       title = ?, duration_seconds = ?, sequence_duration_seconds = ?, sequence_count = ?, genre = ?,
       story_status = ?, film_bible_status = ?, asset_status = ?, sequence_status = ?, continuity_status = ?,
@@ -391,7 +439,7 @@ async function persistProject(project: StudioProject, messages: StudioMessage[],
       project.sequences.every((sequence) => sequence.status === 'Approved') ? 'Approved' : 'In progress',
       project.continuity.status, project.exportStatus, project.pinned ? 1 : 0, project.archived ? 1 : 0,
       project.production.control.dataSchema.currentVersion, project.production.control.stateMachine.current, project.production.control.exportIdentity.collisionSafeSlug,
-      JSON.stringify(project), project.updatedAt, project.id,
+      encodedProject, project.updatedAt, project.id,
     ),
     DB.prepare('UPDATE project_transactions SET revision = ?, last_transaction_id = ?, updated_at = ? WHERE project_id = ?')
       .bind(nextRevision, transactionId, project.updatedAt, project.id),
@@ -409,6 +457,9 @@ async function persistProject(project: StudioProject, messages: StudioMessage[],
 
   for (const asset of project.assets) {
     const rowId = `${project.id}:${asset.id}`;
+    const generatedMedia = asset.generatedAttachmentId
+      ? await DB.prepare('SELECT media_key FROM asset_references WHERE id = ? AND project_id = ?').bind(asset.generatedAttachmentId, project.id).first<{ media_key: string }>()
+      : null;
     statements.push(
       DB.prepare(`INSERT INTO assets (
         id, project_id, stable_id, name, category, description, sequences_json, approval_state, lock_state,
@@ -421,8 +472,14 @@ async function persistProject(project: StudioProject, messages: StudioMessage[],
         rowId, project.id, asset.id, asset.name, asset.category, asset.description, JSON.stringify(asset.sequences),
         asset.approvalState, asset.lockState, asset.lifecycleStatus, asset.version, project.createdAt, project.updatedAt,
       ),
-      DB.prepare('INSERT OR IGNORE INTO asset_versions (id, asset_id, version, description, approval_state, notes, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
-        .bind(crypto.randomUUID(), rowId, asset.version, asset.description, asset.approvalState, asset.notes, project.updatedAt),
+      DB.prepare(`INSERT INTO asset_versions (id, asset_id, version, description, media_key, approval_state, notes, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(asset_id, version) DO UPDATE SET
+          description = excluded.description,
+          media_key = COALESCE(excluded.media_key, asset_versions.media_key),
+          approval_state = excluded.approval_state,
+          notes = excluded.notes`)
+        .bind(crypto.randomUUID(), rowId, asset.version, asset.description, generatedMedia?.media_key ?? null, asset.approvalState, asset.notes, project.updatedAt),
     );
   }
 
@@ -465,7 +522,7 @@ function initialAssistantMessage(project: StudioProject): StudioMessage {
     id: `message_${crypto.randomUUID()}`,
     role: 'assistant',
     createdAt: nowIso(),
-    content: `I created “${project.title}” as one connected ${project.durationSeconds / 60}-minute production world with ${project.sequenceCount} timed sequences, ${project.assets.length} permanently numbered assets, ${project.locations.length} structured locations, ${project.environments.length} environment state${project.environments.length === 1 ? '' : 's'}, and ${project.production.dependencies.length} tracked production dependencies. Every visual asset uses one project-wide number and will export directly inside ${project.flatAssetFolder.folderName} with no subfolders. Dependency freshness, revisions, reference priority, render recovery, validation, checkpoints, and final assembly are active. Review the story first; nothing has been generated or approved yet.`,
+    content: `I shaped the first story draft for “${project.title}” from your idea. Read it here, copy or download it, or tell me what to change. Nothing has been generated, approved, or sent to an image or video provider. When the story feels right, choose how you want me to continue through the non-paid production preparation.`,
     metadata: { kind: 'story' },
   };
 }
@@ -495,6 +552,7 @@ export async function POST(request: Request) {
       action?: 'pin' | 'archive' | 'settings';
       settings?: Partial<StudioProject['settings']>;
       expectedRevision?: number;
+      attachmentId?: string;
     };
 
     if (!body.projectId) {
@@ -539,7 +597,7 @@ export async function POST(request: Request) {
     const rollback = await resolveRollback(project, content);
     const result = rollback
       ? { project: rollback.project, response: { id: `message_${crypto.randomUUID()}`, role: 'assistant' as const, content: rollback.text, createdAt: nowIso(), metadata: { kind: 'control' as const } } }
-      : interpretStudioMessage(project, content);
+      : interpretStudioMessage(project, content, { preferredAttachmentId: body.attachmentId });
     const normalized = normalizeProject(result.project);
     await persistProject(normalized, [userMessage, result.response], expectedRevision, rollback ? 'rollback' : 'chat', content.slice(0, 240), beforeProject);
     return json({ project: normalized, messages: [userMessage, result.response], projects: await listProjects(), sideEffect: 'sideEffect' in result ? result.sideEffect : undefined });

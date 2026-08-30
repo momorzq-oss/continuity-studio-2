@@ -2,7 +2,23 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { zipSync } from 'fflate';
 
+import { getProductionDocument } from '../lib/chat-documents.ts';
+import { decodeProjectState, encodeProjectState, isCompressedProjectState } from '../lib/project-state-codec.ts';
+
 const base = process.env.CONTINUITY_STUDIO_URL ?? 'http://localhost:3000';
+
+test('large canonical and recovery states remain database-resident and losslessly compressed', async () => {
+  const state = {
+    id: 'project_scale_fixture',
+    prompts: Array.from({ length: 24 }, (_, index) => ({ sequence: index + 1, prompt: `SEQUENCE_${index + 1} ${'continuity '.repeat(12_000)}` })),
+    immutable: true,
+  };
+  const encoded = await encodeProjectState(state);
+  assert.equal(isCompressedProjectState(encoded), true);
+  assert.ok(encoded.length < JSON.stringify(state).length / 10);
+  assert.deepEqual(await decodeProjectState(encoded), state);
+  assert.deepEqual(await decodeProjectState(JSON.stringify({ legacy: true })), { legacy: true });
+});
 
 async function jsonRequest(path, init) {
   const response = await fetch(`${base}${path}`, init);
@@ -18,6 +34,109 @@ async function command(project, message) {
   assert.equal(response.status, 200, `${message}: ${data.error ?? response.status}`);
   return data.project;
 }
+
+async function commandWithAttachment(project, message, attachmentId) {
+  const { response, data } = await jsonRequest('/api/studio', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ projectId: project.id, expectedRevision: project.storageRevision, message, attachmentId }),
+  });
+  assert.equal(response.status, 200, `${message}: ${data.error ?? response.status}`);
+  return data.project;
+}
+
+test('chat-first blank production preserves one identity, one composite sheet, documents, and explicit generation gates', async () => {
+  const created = await jsonRequest('/api/studio', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ message: `A three minute desert fable about a cartographer who discovers a city that moves at dawn ${Date.now()}` }),
+  });
+  assert.equal(created.response.status, 200, created.data.error);
+  let project = created.data.project;
+  assert.equal(project.settings.pipelineApprovalGranted, false);
+  assert.equal(project.settings.automaticPaidGeneration, false);
+  assert.equal(project.production.renderQueue.length, 0);
+  assert.equal(project.attachments.length, 0);
+  assert.ok(project.assets.length > 0, 'idea analysis should discover the complete numbered manifest');
+  assert.ok(project.assets.every((asset) => !asset.generatedAttachmentId), 'discovery must not create fake media');
+  assert.equal(project.flatAssetFolder.subfoldersAllowed, false);
+  assert.equal(created.data.messages.at(-1).metadata.kind, 'story');
+
+  const story = getProductionDocument(project, 'story');
+  const world = getProductionDocument(project, 'world-bible');
+  const film = getProductionDocument(project, 'film-bible');
+  const sequence = getProductionDocument(project, 'sequence', 1);
+  const scenario = getProductionDocument(project, 'scenario', 1);
+  const script = getProductionDocument(project, 'script', 1);
+  const prompt = getProductionDocument(project, 'seedance-prompt', 1);
+  for (const document of [story, world, film, sequence, scenario, script, prompt]) {
+    assert.ok(document?.content.length > 100);
+    assert.match(document.filename, /\.(md|txt)$/);
+  }
+  assert.match(prompt.content, /\[SCENARIO\]/);
+
+  project = await command(project, 'Automatic Production');
+  assert.equal(project.settings.approvalMode, 'automatic');
+  assert.equal(project.settings.pipelineApprovalGranted, true);
+  assert.equal(project.story.status, 'Approved');
+  assert.equal(project.worldBible.status, 'Approved');
+  assert.equal(project.filmBible.status, 'Approved');
+  assert.equal(project.production.renderQueue.length, 0);
+  project = await command(project, 'Continue');
+  assert.equal(project.production.renderQueue.length, 0, 'Continue must never queue paid video');
+
+  const startingAssetCount = project.assets.length;
+  const referenceIds = [];
+  for (let index = 0; index < 4; index += 1) {
+    const form = new FormData();
+    form.append('projectId', project.id);
+    form.append('expectedRevision', String(project.storageRevision));
+    form.append('role', 'Main character likeness reference');
+    form.append('file', new File([new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10, index + 1])], `main-character-angle-${index + 1}.png`, { type: 'image/png' }));
+    const uploaded = await jsonRequest('/api/files', { method: 'POST', body: form });
+    assert.equal(uploaded.response.status, 200, uploaded.data.error);
+    project = uploaded.data.project;
+    referenceIds.push(uploaded.data.attachment.id);
+  }
+  assert.equal(project.assets.length, startingAssetCount, 'source references must not become numbered assets');
+  const identityReferences = project.attachments.filter((attachment) => referenceIds.includes(attachment.id));
+  assert.equal(identityReferences.length, 4);
+  assert.ok(identityReferences.every((attachment) => attachment.linkedAssetId === 'CHARACTER_001'));
+  assert.ok(identityReferences.every((attachment) => attachment.identityGroupId === 'CHARACTER_IDENTITY_001'));
+  assert.equal(new Set(identityReferences.map((attachment) => attachment.identityGroupId)).size, 1);
+
+  project = await command(project, 'Create the master character sheet');
+  const mainCharacter = project.assets.find((asset) => asset.id === 'CHARACTER_001');
+  assert.equal(project.assets.length, startingAssetCount);
+  assert.equal(mainCharacter.projectNumber, 1);
+  assert.equal(mainCharacter.sheet.kind, 'Master Character Sheet');
+  assert.equal(mainCharacter.sheet.composite, true);
+  assert.equal(mainCharacter.sheet.panelCount, 6);
+  assert.deepEqual(mainCharacter.sheet.sourceReferenceIds, referenceIds);
+  assert.equal(mainCharacter.sheet.generationStatus, 'Prepared');
+  assert.equal(mainCharacter.generatedAttachmentId, undefined);
+  assert.equal(project.production.renderQueue.length, 0);
+
+  const environmentAsset = project.assets.find((asset) => asset.category === 'Environment States');
+  project = await command(project, 'Create the environment sheet');
+  assert.equal(project.assets.length, startingAssetCount, 'panels inside another composed production sheet must not inflate the asset count');
+  assert.equal(project.assets.find((asset) => asset.id === environmentAsset.id).sheet.composite, true);
+  assert.equal(project.assets.find((asset) => asset.id === environmentAsset.id).sheet.panelCount, 4);
+  assert.equal(project.production.renderQueue.length, 0);
+
+  const revisionBefore = project.production.sequencePlans.SEQUENCE_001.revision;
+  project = await command(project, 'Regenerate Sequence 1');
+  assert.equal(project.production.sequencePlans.SEQUENCE_001.revision, revisionBefore + 1);
+  assert.equal(project.production.renderQueue.length, 0, 'regenerate must not be parsed as generate');
+  project = await command(project, 'Regenerate the Seedance prompt for Sequence 1');
+  project = await command(project, 'Regenerate the script for Sequence 1');
+  project = await command(project, 'Regenerate the scenario for Sequence 1');
+  assert.equal(project.production.renderQueue.length, 0);
+
+  const restored = await jsonRequest(`/api/studio?projectId=${encodeURIComponent(project.id)}`);
+  assert.equal(restored.response.status, 200, restored.data.error);
+  assert.equal(restored.data.project.id, project.id);
+  assert.equal(restored.data.project.attachments.length, 4);
+  assert.equal(restored.data.project.assets.find((asset) => asset.id === 'CHARACTER_001').sheet.sourceReferenceIds.length, 4);
+});
 
 test('production controls, concurrency, dialogue, provenance, rollback, files, import, and export', async () => {
   const created = await jsonRequest('/api/studio', {
@@ -310,4 +429,82 @@ test('single-sequence production reaches completed state and preserves prompt co
   project = await command(project, 'Approve final assembly');
   assert.equal(project.production.finalAssembly.status, 'Approved');
   assert.equal(project.production.control.stateMachine.current, 'Completed');
+});
+
+test('filmmaker regressions preserve exact attachments, sequence IDs, dialect, costume ranges, and immutable asset versions', async () => {
+  const idea = `A one minute atmospheric mystery about a signal keeper who hears tomorrow's warning ${Date.now()}`;
+  const created = await jsonRequest('/api/studio', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ message: idea }),
+  });
+  assert.equal(created.response.status, 200);
+  let project = created.data.project;
+  assert.equal(project.durationSeconds, 60);
+  assert.equal(project.sequenceCount, 2);
+  assert.match(project.story.logline, /signal keeper who hears tomorrow's warning/i);
+  assert.equal(project.story.protagonist, 'The Signal Keeper');
+  assert.notEqual(project.title, 'The Voice Beyond the Door');
+
+  project = await command(project, 'Approve the story');
+  const firstBytes = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10, 41]);
+  const secondBytes = new Uint8Array([...firstBytes, 99]);
+  async function upload(bytes, name) {
+    const form = new FormData();
+    form.append('projectId', project.id);
+    form.append('expectedRevision', String(project.storageRevision));
+    form.append('file', new File([bytes], name, { type: 'image/png' }));
+    const result = await jsonRequest('/api/files', { method: 'POST', body: form });
+    assert.equal(result.response.status, 200, result.data.error);
+    project = result.data.project;
+    return result.data.attachment;
+  }
+  const first = await upload(firstBytes, 'identity.png');
+  const second = await upload(secondBytes, 'identity.png');
+  project = await commandWithAttachment(project, 'Use latest attachment only for face identity', first.id);
+  assert.deepEqual(project.attachments.find((item) => item.id === first.id).roleOverrides, ['Face identity']);
+  assert.equal(project.attachments.find((item) => item.id === second.id).roleOverrides.length, 0);
+  assert.equal(project.story.status, 'Approved', 'reference instructions must not invalidate an approved story');
+  project = await commandWithAttachment(project, 'Use latest attachment as generated master for Asset 001', first.id);
+  assert.equal(project.assets.find((item) => item.projectNumber === 1).generatedAttachmentId, first.id);
+
+  project = await command(project, 'Approve the World Bible');
+  project = await command(project, 'Approve the Film Bible');
+  const originalCostume = project.assets.find((item) => item.category === 'Costumes');
+  assert.ok(originalCostume);
+  project = await command(project, 'Add a new costume called Storm Coat for Sequences 2 through 2');
+  const replacementCostume = project.assets.find((item) => item.category === 'Costumes' && item.id !== originalCostume.id);
+  assert.ok(replacementCostume);
+  project = await command(project, `From Sequence 2 onward, replace costume Asset ${String(originalCostume.projectNumber).padStart(3, '0')} with Asset ${String(replacementCostume.projectNumber).padStart(3, '0')}`);
+  assert.ok(originalCostume.projectNumber > 0);
+  assert.ok(project.assets.find((item) => item.id === originalCostume.id).sequences.every((number) => number < 2));
+  assert.deepEqual(project.assets.find((item) => item.id === replacementCostume.id).sequences, [2]);
+  assert.deepEqual(project.production.sequencePlans.SEQUENCE_002.scenario.characterContinuity[0].currentAppearance.costumeAssetNumbers, [replacementCostume.projectNumber]);
+
+  project = await command(project, 'Lock project dialogue language to Arabic with Gulf dialect');
+  project = await command(project, 'Approve all assets');
+  project = await command(project, 'Set provider reference limit to 30');
+  project = await command(project, 'Asset 001 is non-speaking in Sequence 1');
+  project = await command(project, 'Asset 001 says "The warning arrives tomorrow" in Sequence 1');
+  const line = project.production.sequencePlans.SEQUENCE_001.dialogue.at(-1);
+  assert.equal(line.languageLock, 'Arabic');
+  assert.equal(line.dialectLock, 'Gulf');
+  assert.ok(!project.production.sequencePlans.SEQUENCE_001.scenario.nonSpeakingCharacterAssetIds.includes('CHARACTER_001'));
+
+  project = await command(project, 'Generate SEQUENCE_001');
+  assert.equal(project.production.renderQueue.at(-1).status, 'Awaiting Confirmation');
+  const firstSnapshot = project.production.generationSnapshots.at(-1);
+  assert.equal(firstSnapshot.assetVersions.find((item) => item.assetNumber === 1).generatedAttachmentId, first.id);
+  project = await commandWithAttachment(project, 'Use latest attachment as generated master for Asset 001', second.id);
+  assert.equal(project.assets.find((item) => item.projectNumber === 1).version, 2);
+  project = await command(project, 'Approve Asset 001');
+  project = await command(project, 'Generate SEQUENCE_001');
+  const secondSnapshot = project.production.generationSnapshots.at(-1);
+  assert.notEqual(secondSnapshot.structuredStateHash, firstSnapshot.structuredStateHash);
+  assert.equal(secondSnapshot.assetVersions.find((item) => item.assetNumber === 1).generatedAttachmentId, second.id);
+  assert.equal(project.production.renderQueue.length, 2);
+
+  project = await command(project, 'Change the movie duration to 90 seconds');
+  assert.equal(project.production.control.stateMachine.current, 'Story Draft');
+  assert.ok(project.production.renderQueue.length > 0, 'render history must survive an upstream revision');
+  project = await command(project, 'Approve the story');
+  assert.equal(project.production.control.stateMachine.current, 'Story Approved', 'render history must not prevent legal prerequisite reapproval');
 });

@@ -474,6 +474,11 @@ export function createFreezeSnapshot(project: StudioProject, reason: string): Pr
 }
 
 function deriveLifecycleState(project: StudioProject): ProjectLifecycleState {
+  // Approved prerequisites remain authoritative even after render history exists.
+  // If an upstream story or Bible revision invalidates them, the workflow must
+  // return to the corresponding approval state so the user can legally recover.
+  if (project.story.status !== 'Approved') return 'Story Draft';
+  if (project.worldBible.status !== 'Approved' || project.filmBible.status !== 'Approved') return 'Story Approved';
   if (project.production?.finalAssembly?.status === 'Approved' && project.production?.finalQuality?.status === 'Passed') return 'Completed';
   if (project.sequences.length > 0 && project.sequences.every((sequence) => sequence.status === 'Approved')) return 'Final Review';
   if ((project.production?.renderQueue?.length ?? 0) > 0 || project.sequences.some((sequence) => ['Generating', 'Generated', 'Passed', 'Approved'].includes(sequence.status))) return 'Production Started';
@@ -483,9 +488,7 @@ function deriveLifecycleState(project: StudioProject): ProjectLifecycleState {
     const plans = Object.values(project.production?.sequencePlans ?? {});
     return plans.length === project.sequences.length && plans.every((plan) => plan.readinessChecklist.readyForGeneration) ? 'Sequences Ready' : 'Assets Approved';
   }
-  if (project.story.status === 'Approved' && project.worldBible.status === 'Approved' && project.filmBible.status === 'Approved') return 'Assets Pending';
-  if (project.story.status === 'Approved') return 'Story Approved';
-  return 'Story Draft';
+  return 'Assets Pending';
 }
 
 function lifecycleBlockers(project: StudioProject, state: ProjectLifecycleState) {

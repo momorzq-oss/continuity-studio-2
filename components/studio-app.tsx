@@ -1,17 +1,16 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type ClipboardEvent, type DragEvent, type KeyboardEvent } from 'react';
 import {
   Archive,
   ArrowLeft,
   ArrowUp,
-  BookOpen,
   Check,
   ChevronDown,
   Clapperboard,
-  Compass,
   Copy,
   Download,
+  FileText,
   FileArchive,
   FileImage,
   Film,
@@ -24,6 +23,7 @@ import {
   Moon,
   Network,
   Paperclip,
+  Pencil,
   Pin,
   Play,
   Plus,
@@ -42,6 +42,7 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Progress } from '@/components/ui/progress';
 import { Switch } from '@/components/ui/switch';
+import { getProductionDocument, type ProductionDocumentKind } from '@/lib/chat-documents';
 import { cn } from '@/lib/utils';
 import type { ProjectSummary, StudioAsset, StudioMessage, StudioProject, StudioSequence } from '@/lib/studio';
 
@@ -51,7 +52,6 @@ const primaryNavigation = [
   { id: 'projects' as const, label: 'Projects', icon: FolderClock },
   { id: 'assets' as const, label: 'Asset Library', icon: Library },
   { id: 'exports' as const, label: 'Exports', icon: Archive },
-  { id: 'advanced' as const, label: 'Advanced Control', icon: Network },
 ];
 
 const assetFilters = ['All', 'Characters', 'Creatures', 'Animals', 'Locations', 'Interiors', 'Environment States', 'Vehicles', 'Props', 'Weapons', 'Costumes', 'Furniture', 'Mechanical Systems', 'Approved', 'Pending', 'Needs Review', 'Retired', 'Orphaned'];
@@ -72,6 +72,85 @@ function durationLabel(seconds: number) {
 
 function assetNumber(value: number) {
   return String(value).padStart(3, '0');
+}
+
+function downloadText(filename: string, content: string) {
+  const url = URL.createObjectURL(new Blob([content], { type: filename.endsWith('.txt') ? 'text/plain;charset=utf-8' : 'text/markdown;charset=utf-8' }));
+  const anchor = document.createElement('a');
+  anchor.href = url;
+  anchor.download = filename;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  URL.revokeObjectURL(url);
+}
+
+const documentLabels: Record<ProductionDocumentKind, string> = {
+  story: 'Story',
+  script: 'Script',
+  scenario: 'Scenario',
+  'world-bible': 'World Bible',
+  'film-bible': 'Film Bible',
+  sequence: 'Sequence Plan',
+  'seedance-prompt': 'Seedance Prompt',
+};
+
+function regenerateInstruction(kind: ProductionDocumentKind, sequenceNumber?: number) {
+  if (kind === 'story') return 'Regenerate the story';
+  if (kind === 'world-bible') return 'Regenerate the World Bible';
+  if (kind === 'film-bible') return 'Regenerate the Film Bible';
+  const sequence = `Sequence ${sequenceNumber ?? 1}`;
+  if (kind === 'script') return `Regenerate the script for ${sequence}`;
+  if (kind === 'scenario') return `Regenerate the scenario for ${sequence}`;
+  if (kind === 'seedance-prompt') return `Regenerate the Seedance prompt for ${sequence}`;
+  return `Regenerate ${sequence}`;
+}
+
+function ProductionDocumentCard({ project, kind, sequenceNumber, onAction, onEdit }: { project: StudioProject; kind: ProductionDocumentKind; sequenceNumber?: number; onAction: (message: string) => void; onEdit: (kind: ProductionDocumentKind, sequenceNumber?: number) => void }) {
+  const [copied, setCopied] = useState(false);
+  const document = getProductionDocument(project, kind, sequenceNumber);
+  if (!document) return null;
+  const copy = async () => {
+    await navigator.clipboard.writeText(document.content);
+    setCopied(true);
+    window.setTimeout(() => setCopied(false), 1600);
+  };
+  return (
+    <section className="mt-4 overflow-hidden rounded-2xl border border-border bg-card/65">
+      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border/70 px-4 py-3">
+        <div className="flex items-center gap-2.5"><FileText className="size-4 text-amber-300" /><span className="text-sm font-medium">{document.title}</span></div>
+        <Badge variant="outline" className={statusClass(document.status)}>{document.status}</Badge>
+      </div>
+      <details className="group" open={kind === 'story'}>
+        <summary className="cursor-pointer list-none px-4 py-3 text-xs font-medium text-muted-foreground transition hover:text-foreground">Read the complete {documentLabels[kind].toLowerCase()} <ChevronDown className="ml-1 inline size-3.5 transition group-open:rotate-180" /></summary>
+        <pre className="max-h-[34rem] overflow-auto whitespace-pre-wrap border-t border-border/60 bg-background/35 px-4 py-4 font-sans text-xs leading-6 text-foreground/85">{document.content}</pre>
+      </details>
+      <div className="flex flex-wrap gap-2 border-t border-border/70 bg-background/35 px-4 py-3">
+        <Button size="sm" variant="outline" onClick={() => void copy()}>{copied ? <Check /> : <Copy />}{copied ? 'Copied' : `Copy ${documentLabels[kind]}`}</Button>
+        <Button size="sm" variant="outline" onClick={() => downloadText(document.filename, document.content)}><Download />Download</Button>
+        <Button size="sm" variant="ghost" onClick={() => onEdit(kind, sequenceNumber)}><Pencil />Edit</Button>
+        <Button size="sm" variant="ghost" onClick={() => onAction(regenerateInstruction(kind, sequenceNumber))}><RefreshCw />Regenerate</Button>
+      </div>
+    </section>
+  );
+}
+
+function ApprovalModeCard({ project, onAction }: { project: StudioProject; onAction: (message: string) => void }) {
+  if (project.settings.pipelineApprovalGranted) {
+    const label = project.settings.approvalMode === 'automatic' ? 'Automatic Production' : project.settings.approvalMode === 'master' ? 'Master Approval' : 'Manual Approval';
+    return <div className="mt-4 rounded-2xl border border-emerald-400/20 bg-emerald-400/5 p-4"><div className="flex items-center gap-2 text-sm font-medium text-emerald-100"><ShieldCheck className="size-4" />{label} is active</div><p className="mt-2 text-xs leading-5 text-muted-foreground">This approval covers non-paid planning only. Images and video still require a clear generation request.</p></div>;
+  }
+  return (
+    <section className="mt-4 rounded-2xl border border-amber-300/20 bg-card/65 p-4">
+      <p className="text-sm font-medium">How should I ask for approval?</p>
+      <p className="mt-1 text-xs leading-5 text-muted-foreground">Choose once for this movie. None of these choices authorizes image or video generation.</p>
+      <div className="mt-4 grid gap-2 sm:grid-cols-3">
+        <button type="button" onClick={() => onAction('Automatic Production')} className="rounded-xl border border-amber-300/25 bg-amber-300/8 p-3 text-left transition hover:bg-amber-300/12"><span className="text-xs font-medium text-amber-100">Automatic Production</span><span className="mt-1 block text-[10px] leading-4 text-muted-foreground">Recommended. Continue through safe planning and pause for references or generation.</span></button>
+        <button type="button" onClick={() => onAction('Master Approval')} className="rounded-xl border border-border bg-background/45 p-3 text-left transition hover:bg-background/70"><span className="text-xs font-medium">Master Approval</span><span className="mt-1 block text-[10px] leading-4 text-muted-foreground">Approve the complete non-paid production plan once.</span></button>
+        <button type="button" onClick={() => onAction('Manual Approval')} className="rounded-xl border border-border bg-background/45 p-3 text-left transition hover:bg-background/70"><span className="text-xs font-medium">Manual Approval</span><span className="mt-1 block text-[10px] leading-4 text-muted-foreground">Review and approve every stage yourself.</span></button>
+      </div>
+    </section>
+  );
 }
 
 function assetTone(category: string) {
@@ -108,7 +187,6 @@ function ProjectStatus({ project }: { project: StudioProject }) {
   const [open, setOpen] = useState(false);
   const approvedAssets = project.assets.filter((asset) => ['Approved', 'Locked'].includes(asset.approvalState)).length;
   const approvedSequences = project.sequences.filter((sequence) => sequence.status === 'Approved').length;
-  const dependencyImpacts = project.production.dependencies.filter((item) => item.freshness !== 'Current').length;
   return (
     <div className="relative">
       <button
@@ -133,17 +211,12 @@ function ProjectStatus({ project }: { project: StudioProject }) {
           </div>
           <div className="mt-4 grid grid-cols-2 gap-x-5 gap-y-3 text-xs">
             <StatusLine label="Story" value={project.story.status} />
-            <StatusLine label="Story lock" value={project.production.storyLock.status} />
             <StatusLine label="World Bible" value={project.worldBible.status} />
             <StatusLine label="Film Bible" value={project.filmBible.status} />
             <StatusLine label="Assets" value={`${approvedAssets}/${project.assets.length}`} />
             <StatusLine label="Asset folder" value={project.flatAssetFolder.folderName} />
             <StatusLine label="Sequences" value={`${approvedSequences}/${project.sequenceCount}`} />
-            <StatusLine label="Dependencies" value={dependencyImpacts ? `${dependencyImpacts} affected` : 'Current'} />
-            <StatusLine label="Render queue" value={`${project.production.renderQueue.length} jobs`} />
-            <StatusLine label="Pipeline" value={project.production.currentPipelineStage} />
-            <StatusLine label="Project state" value={project.production.control.stateMachine.current} />
-            <StatusLine label="Current" value={`Sequence ${project.currentSequence}`} />
+            <StatusLine label="Approval" value={project.settings.approvalMode === 'automatic' ? 'Automatic' : project.settings.approvalMode === 'master' ? 'Master' : 'Manual'} />
             <StatusLine label="Export" value={project.exportStatus} />
           </div>
           <div className="mt-4 rounded-xl bg-background/55 p-3 text-xs leading-5 text-muted-foreground"><span className="font-medium text-foreground">Next:</span> {project.production.nextLogicalAction}</div>
@@ -162,84 +235,16 @@ function StatusLine({ label, value }: { label: string; value: string }) {
   );
 }
 
-function StoryCard({ project, onAction }: { project: StudioProject; onAction: (message: string) => void }) {
-  return (
-    <section className="mt-4 overflow-hidden rounded-2xl border border-border bg-card/65">
-      <div className="flex items-center justify-between border-b border-border/70 px-4 py-3">
-        <div className="flex items-center gap-2.5">
-          <BookOpen className="size-4 text-amber-300" />
-          <span className="text-sm font-medium">Story · v{project.story.version}</span>
-        </div>
-        <Badge variant="outline" className={statusClass(project.story.status)}>{project.story.status}</Badge>
-      </div>
-      <div className="space-y-4 p-4 text-sm">
-        <div>
-          <p className="mb-1 text-[10px] font-semibold uppercase tracking-[0.15em] text-muted-foreground">Logline</p>
-          <p className="leading-6 text-foreground/90">{project.story.logline}</p>
-        </div>
-        <div className="grid gap-3 sm:grid-cols-2">
-          <div className="rounded-xl bg-background/55 p-3">
-            <p className="text-[10px] font-semibold uppercase tracking-[0.14em] text-muted-foreground">Midpoint</p>
-            <p className="mt-1.5 text-xs leading-5 text-foreground/80">{project.story.midpoint}</p>
-          </div>
-          <div className="rounded-xl bg-background/55 p-3">
-            <p className="text-[10px] font-semibold uppercase tracking-[0.14em] text-muted-foreground">Ending</p>
-            <p className="mt-1.5 text-xs leading-5 text-foreground/80">{project.story.ending}</p>
-          </div>
-        </div>
-      </div>
-      <div className="flex flex-wrap gap-2 border-t border-border/70 bg-background/35 px-4 py-3">
-        {project.story.status !== 'Approved' && <Button size="sm" onClick={() => onAction('Approve the story')}><Check />Approve story</Button>}
-        <Button size="sm" variant="outline" onClick={() => onAction('Make it scarier')}>Make scarier</Button>
-        <Button size="sm" variant="ghost" onClick={() => onAction('Continue')}>Continue</Button>
-      </div>
-    </section>
-  );
+function StoryCard({ project, onAction, onEdit }: { project: StudioProject; onAction: (message: string) => void; onEdit: (kind: ProductionDocumentKind, sequenceNumber?: number) => void }) {
+  return <><ProductionDocumentCard project={project} kind="story" onAction={onAction} onEdit={onEdit} /><ApprovalModeCard project={project} onAction={onAction} /></>;
 }
 
-function BibleCard({ project, onAction }: { project: StudioProject; onAction: (message: string) => void }) {
-  return (
-    <section className="mt-4 rounded-2xl border border-border bg-card/65 p-4">
-      <div className="flex items-center justify-between gap-3">
-        <div className="flex items-center gap-2.5"><Clapperboard className="size-4 text-amber-300" /><span className="text-sm font-medium">Film Bible · v{project.filmBible.version}</span></div>
-        <Badge variant="outline" className={statusClass(project.filmBible.status)}>{project.filmBible.status}</Badge>
-      </div>
-      <div className="mt-4 grid gap-4 sm:grid-cols-2">
-        <RuleGroup title="Visual direction" rules={[project.visualStyle, project.cameraStyle, project.lightingDirection]} />
-        <RuleGroup title="Continuity rules" rules={project.filmBible.continuityRules} />
-      </div>
-      <div className="mt-4 flex flex-wrap gap-2 border-t border-border/70 pt-3">
-        {project.filmBible.status !== 'Approved' && <Button size="sm" onClick={() => onAction('Approve the Film Bible')}><Check />Approve Film Bible</Button>}
-        <Button size="sm" variant="outline" onClick={() => onAction('Change the entire movie to night only')}>Night only</Button>
-      </div>
-    </section>
-  );
+function BibleCard({ project, onAction, onEdit }: { project: StudioProject; onAction: (message: string) => void; onEdit: (kind: ProductionDocumentKind, sequenceNumber?: number) => void }) {
+  return <ProductionDocumentCard project={project} kind="film-bible" onAction={onAction} onEdit={onEdit} />;
 }
 
-function WorldCard({ project, onAction }: { project: StudioProject; onAction: (message: string) => void }) {
-  const world = project.worldBible;
-  return (
-    <section className="mt-4 overflow-hidden rounded-2xl border border-border bg-card/65">
-      <div className="flex items-center justify-between border-b border-border/70 px-4 py-3">
-        <div className="flex items-center gap-2.5"><Compass className="size-4 text-amber-300" /><span className="text-sm font-medium">World Bible · v{world.version}</span></div>
-        <Badge variant="outline" className={statusClass(world.status)}>{world.status}</Badge>
-      </div>
-      <div className="grid gap-3 p-4 text-xs sm:grid-cols-3">
-        <StateBlock label="World" value={`${world.geography} · ${world.historicalPeriod}`} />
-        <StateBlock label="Technology" value={world.technologyLevel} />
-        <StateBlock label="Culture" value={world.culture} />
-      </div>
-      <div className="grid gap-4 px-4 pb-4 sm:grid-cols-3">
-        <RuleGroup title="Materials & architecture" rules={[...world.architecture, ...world.constructionMaterials]} />
-        <RuleGroup title="Physical-world restrictions" rules={[...world.physicalRules, ...world.restrictions]} />
-        <RuleGroup title="Single flat asset folder" rules={world.objectRules.slice(0, 3)} />
-      </div>
-      <div className="flex flex-wrap gap-2 border-t border-border/70 bg-background/35 px-4 py-3">
-        {world.status !== 'Approved' && <Button size="sm" onClick={() => onAction('Approve the World Bible')}><Check />Approve World Bible</Button>}
-        <Button size="sm" variant="outline" onClick={() => onAction('Show environment states')}>Environment states</Button>
-      </div>
-    </section>
-  );
+function WorldCard({ project, onAction, onEdit }: { project: StudioProject; onAction: (message: string) => void; onEdit: (kind: ProductionDocumentKind, sequenceNumber?: number) => void }) {
+  return <ProductionDocumentCard project={project} kind="world-bible" onAction={onAction} onEdit={onEdit} />;
 }
 
 function RuleGroup({ title, rules }: { title: string; rules: string[] }) {
@@ -299,8 +304,9 @@ function AssetsCard({ project, ids, onAction, onOpenLibrary }: { project: Studio
   );
 }
 
-function SequenceCard({ project, sequence, onAction }: { project: StudioProject; sequence: StudioSequence; onAction: (message: string) => void }) {
-  const copyPrompt = async () => navigator.clipboard.writeText(sequence.prompt);
+function SequenceCard({ project, sequence, onAction, onEdit }: { project: StudioProject; sequence: StudioSequence; onAction: (message: string) => void; onEdit: (kind: ProductionDocumentKind, sequenceNumber?: number) => void }) {
+  const sequenceDocument = getProductionDocument(project, 'sequence', sequence.number);
+  const promptDocument = getProductionDocument(project, 'seedance-prompt', sequence.number);
   const plan = project.production.sequencePlans[sequence.id];
   const job = project.production.renderQueue.findLast((item) => item.sequenceNumber === sequence.number);
   const timingAudit = project.production.control.dialogueTimingAudits[sequence.id];
@@ -362,14 +368,14 @@ function SequenceCard({ project, sequence, onAction }: { project: StudioProject;
         </details>
       </div>
       <div className="flex flex-wrap gap-2 border-t border-border/70 bg-background/35 px-4 py-3">
-        <Button size="sm" onClick={() => onAction(`Generate Sequence ${sequence.number}`)}><Play />Generate</Button>
+        <Button size="sm" onClick={() => onAction(`Generate Sequence ${sequence.number}`)}><Play />Generate video</Button>
         {sequence.status !== 'Approved' && <Button size="sm" variant="outline" onClick={() => onAction(`Approve Sequence ${sequence.number}`)}><Check />Approve</Button>}
-        <Button size="sm" variant="ghost" onClick={() => onAction(`Show Scene State for Sequence ${sequence.number}`)}>Scene state</Button>
-        <Button size="sm" variant="ghost" onClick={() => onAction(`Show Scene Graph for Sequence ${sequence.number}`)}>Graph</Button>
-        <Button size="sm" variant="ghost" onClick={() => onAction(`Show timing and shot plan for Sequence ${sequence.number}`)}>Timing</Button>
-        <Button size="sm" variant="ghost" onClick={() => onAction(`Show reference package for Sequence ${sequence.number}`)}>References</Button>
-        <Button size="sm" variant="ghost" onClick={() => onAction(`Validate Sequence ${sequence.number}`)}>Validate</Button>
-        <Button size="sm" variant="ghost" onClick={copyPrompt}><Copy />Copy prompt</Button>
+        <Button size="sm" variant="outline" onClick={() => sequenceDocument && void navigator.clipboard.writeText(sequenceDocument.content)}><Copy />Copy sequence</Button>
+        <Button size="sm" variant="outline" onClick={() => sequenceDocument && downloadText(sequenceDocument.filename, sequenceDocument.content)}><Download />Download sequence</Button>
+        <Button size="sm" variant="ghost" onClick={() => onEdit('sequence', sequence.number)}><Pencil />Edit</Button>
+        <Button size="sm" variant="ghost" onClick={() => onAction(`Regenerate Sequence ${sequence.number}`)}><RefreshCw />Regenerate</Button>
+        <Button size="sm" variant="ghost" onClick={() => promptDocument && void navigator.clipboard.writeText(promptDocument.content)}><Copy />Copy prompt</Button>
+        <Button size="sm" variant="ghost" onClick={() => promptDocument && downloadText(promptDocument.filename, promptDocument.content)}><Download />Download prompt</Button>
       </div>
     </section>
   );
@@ -465,7 +471,62 @@ function ValidationCard({ project, sequence, onAction }: { project: StudioProjec
   return <section className="mt-4 rounded-2xl border border-border bg-card/65 p-4"><div className="flex items-center justify-between gap-3"><div className="flex items-center gap-2"><ShieldCheck className="size-4 text-amber-300" /><p className="text-sm font-medium">{sequence.id} validation</p></div><Badge variant="outline" className={statusClass(report.status)}>{report.status}</Badge></div><div className="mt-4 space-y-2">{report.checks.map((check) => <div key={check.id} className="rounded-xl bg-background/55 p-3"><div className="flex items-center justify-between gap-3 text-xs"><span className="font-medium">{check.name}</span><Badge variant="outline" className={statusClass(check.status)}>{check.status}</Badge></div><p className="mt-2 text-[10px] leading-5 text-muted-foreground">Expected: {check.expected}<br />Actual: {check.actual}</p></div>)}</div>{report.correctionInstruction && <div className="mt-3 rounded-xl border border-rose-400/15 bg-rose-400/5 p-3 text-[10px] leading-5 text-rose-100">Targeted correction: {report.correctionInstruction}</div>}</section>;
 }
 
-function MessageItem({ item, project, onAction, onOpenLibrary, onExport, onAssetExport }: { item: StudioMessage; project: StudioProject; onAction: (message: string) => void; onOpenLibrary: () => void; onExport: () => void; onAssetExport: () => void }) {
+function AssetGenerationCard({ project, assetIds, onAction, onRequestFiles }: { project: StudioProject; assetIds?: string[]; onAction: (message: string) => void; onRequestFiles: () => void }) {
+  const asset = project.assets.find((entry) => assetIds?.includes(entry.id)) ?? project.assets.find((entry) => entry.id === 'CHARACTER_001');
+  if (!asset) return null;
+  const characterIdentity = asset.id === 'CHARACTER_001';
+  const sourceReferences = project.attachments.filter((attachment) => (characterIdentity ? attachment.identityGroupId === 'CHARACTER_IDENTITY_001' : attachment.linkedAssetId === asset.id) && attachment.contentType.startsWith('image/'));
+  const generated = asset.generatedAttachmentId ? project.attachments.find((attachment) => attachment.id === asset.generatedAttachmentId) : undefined;
+  const preview = generated ? `/api/files?projectId=${encodeURIComponent(project.id)}&referenceId=${encodeURIComponent(generated.id)}` : undefined;
+  return (
+    <section className="mt-4 overflow-hidden rounded-2xl border border-amber-300/20 bg-card/65">
+      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border/70 px-4 py-3">
+        <div><p className="text-sm font-medium">Asset {assetNumber(asset.projectNumber)} · {asset.sheet?.kind ?? asset.name}</p><p className="mt-1 font-mono text-[9px] text-muted-foreground">{asset.generatedFileName}</p></div>
+        <Badge variant="outline" className={statusClass(asset.sheet?.generationStatus ?? 'Prepared')}>{asset.sheet?.generationStatus ?? 'References needed'}</Badge>
+      </div>
+      {generated?.contentType.startsWith('image/') && preview && <object data={preview} type={generated.contentType} aria-label={asset.name} className="max-h-[32rem] w-full border-b border-border bg-background object-contain" />}
+      <div className="grid gap-3 p-4 text-xs sm:grid-cols-3">
+        <StateBlock label={characterIdentity ? 'Identity' : 'Asset rule'} value={characterIdentity ? 'One character · one permanent asset number' : 'One production sheet · one permanent asset number'} />
+        <StateBlock label="Source references" value={`${sourceReferences.length} unnumbered reference${sourceReferences.length === 1 ? '' : 's'}`} />
+        <StateBlock label="Output" value={asset.sheet ? `One composite image · ${asset.sheet.panelCount} panels inside it` : 'One composite image when explicitly requested'} />
+      </div>
+      {asset.sheet?.brief && <p className="px-4 pb-4 text-xs leading-6 text-muted-foreground">{asset.sheet.brief}</p>}
+      <div className="flex flex-wrap gap-2 border-t border-border/70 bg-background/35 px-4 py-3">
+        {characterIdentity && <Button size="sm" variant="outline" onClick={onRequestFiles}><Paperclip />Attach references</Button>}
+        {characterIdentity && sourceReferences.length > 0 && !asset.sheet && <Button size="sm" onClick={() => onAction('Create the master character sheet')}><ImageIcon />Create one master sheet</Button>}
+        {characterIdentity && asset.sheet && !generated && <Button size="sm" onClick={() => onAction('Create the master character sheet')}><RefreshCw />Prepare again</Button>}
+        {preview && <a href={preview} download={asset.generatedFileName} className="inline-flex h-7 items-center gap-1 rounded-lg border border-border bg-background px-2.5 text-[0.8rem] font-medium transition hover:bg-muted"><Download className="size-3.5" />Download sheet</a>}
+      </div>
+      <p className="border-t border-border/60 px-4 py-3 text-[10px] leading-5 text-muted-foreground">Panels are views inside this one production image. They never receive separate asset numbers. This request never starts video.</p>
+    </section>
+  );
+}
+
+function ComposerAttachments({ files, onRemove }: { files: File[]; onRemove: (index: number) => void }) {
+  const previews = useMemo(() => files.map((file) => file.type.startsWith('image/') ? URL.createObjectURL(file) : ''), [files]);
+  useEffect(() => {
+    return () => previews.forEach((url) => { if (url) URL.revokeObjectURL(url); });
+  }, [previews]);
+  return <div className="grid grid-cols-2 gap-2 px-2 pb-2 sm:grid-cols-4">{files.map((file, index) => <div key={`${file.name}-${file.lastModified}-${index}`} className="relative overflow-hidden rounded-xl border border-border bg-secondary/65"><div className="grid h-20 place-items-center bg-background/55">{previews[index] ? <object data={previews[index]} type={file.type} aria-label={file.name} className="h-full w-full object-cover" /> : <FileText className="size-5 text-muted-foreground" />}</div><div className="p-2 pr-7"><p className="truncate text-[10px] font-medium">{file.name}</p><p className="mt-0.5 text-[9px] text-muted-foreground">{Math.max(1, Math.round(file.size / 1024))} KB</p></div><button type="button" onClick={() => onRemove(index)} aria-label={`Remove ${file.name}`} className="absolute right-1.5 top-1.5 grid size-6 place-items-center rounded-full bg-black/70 text-white transition hover:bg-black"><X className="size-3.5" /></button></div>)}</div>;
+}
+
+function requestedDocumentAction(instruction: string): { action: 'copy' | 'download'; kind: ProductionDocumentKind; sequenceNumber?: number } | null {
+  const lower = instruction.trim().toLowerCase();
+  const action = /^(?:please\s+)?copy\b/.test(lower) ? 'copy' : /^(?:please\s+)?download\b/.test(lower) ? 'download' : null;
+  if (!action) return null;
+  const sequenceNumber = Number(lower.match(/(?:sequence|seq)[\s_-]*0*(\d+)/)?.[1] ?? 0) || undefined;
+  const kind: ProductionDocumentKind | null = /seedance|prompt/.test(lower) ? 'seedance-prompt'
+    : /world\s+bible/.test(lower) ? 'world-bible'
+      : /film\s+bible/.test(lower) ? 'film-bible'
+        : /scenario/.test(lower) ? 'scenario'
+          : /script|screenplay/.test(lower) ? 'script'
+            : /sequence|seq/.test(lower) ? 'sequence'
+              : /story/.test(lower) ? 'story'
+                : null;
+  return kind ? { action, kind, sequenceNumber } : null;
+}
+
+function MessageItem({ item, project, onAction, onEdit, onRequestFiles, onOpenLibrary, onExport, onAssetExport }: { item: StudioMessage; project: StudioProject; onAction: (message: string) => void; onEdit: (kind: ProductionDocumentKind, sequenceNumber?: number) => void; onRequestFiles: () => void; onOpenLibrary: () => void; onExport: () => void; onAssetExport: () => void }) {
   if (item.role === 'user') {
     return <div className="ml-auto max-w-[82%] rounded-[18px_18px_5px_18px] bg-secondary px-4 py-3 text-sm leading-6 text-secondary-foreground shadow-sm">{item.content}</div>;
   }
@@ -475,11 +536,16 @@ function MessageItem({ item, project, onAction, onOpenLibrary, onExport, onAsset
       <div className="flex gap-3">
         <span className="brand-mark mt-0.5 grid size-7 shrink-0 place-items-center rounded-lg"><Clapperboard className="size-3.5" /></span>
         <div className="min-w-0 flex-1"><p className="max-w-2xl text-sm leading-6 text-foreground/90">{item.content}</p>
-          {item.metadata?.kind === 'story' && <StoryCard project={project} onAction={onAction} />}
-          {item.metadata?.kind === 'world' && <WorldCard project={project} onAction={onAction} />}
-          {item.metadata?.kind === 'bible' && <BibleCard project={project} onAction={onAction} />}
+          {item.metadata?.kind === 'story' && <StoryCard project={project} onAction={onAction} onEdit={onEdit} />}
+          {item.metadata?.kind === 'world' && <WorldCard project={project} onAction={onAction} onEdit={onEdit} />}
+          {item.metadata?.kind === 'bible' && <BibleCard project={project} onAction={onAction} onEdit={onEdit} />}
+          {item.metadata?.kind === 'script' && sequence && <ProductionDocumentCard project={project} kind="script" sequenceNumber={sequence.number} onAction={onAction} onEdit={onEdit} />}
+          {item.metadata?.kind === 'scenario' && sequence && <ProductionDocumentCard project={project} kind="scenario" sequenceNumber={sequence.number} onAction={onAction} onEdit={onEdit} />}
+          {item.metadata?.kind === 'prompt' && sequence && <ProductionDocumentCard project={project} kind="seedance-prompt" sequenceNumber={sequence.number} onAction={onAction} onEdit={onEdit} />}
+          {item.metadata?.kind === 'approval' && <ApprovalModeCard project={project} onAction={onAction} />}
+          {item.metadata?.kind === 'asset-generation' && <AssetGenerationCard project={project} assetIds={item.metadata.assetIds} onAction={onAction} onRequestFiles={onRequestFiles} />}
           {item.metadata?.kind === 'assets' && <AssetsCard project={project} ids={item.metadata.assetIds} onAction={onAction} onOpenLibrary={onOpenLibrary} />}
-          {['sequence', 'timing', 'reference-package'].includes(item.metadata?.kind ?? '') && sequence && <SequenceCard project={project} sequence={sequence} onAction={onAction} />}
+          {['sequence', 'timing', 'reference-package'].includes(item.metadata?.kind ?? '') && sequence && <SequenceCard project={project} sequence={sequence} onAction={onAction} onEdit={onEdit} />}
           {['scene', 'graph', 'lookahead'].includes(item.metadata?.kind ?? '') && sequence && <SceneIntelligenceCard sequence={sequence} />}
           {item.metadata?.kind === 'dialogue' && sequence && <DialogueCard project={project} sequence={sequence} />}
           {item.metadata?.kind === 'validation' && sequence && <ValidationCard project={project} sequence={sequence} onAction={onAction} />}
@@ -504,6 +570,8 @@ export function StudioApp() {
   const [booting, setBooting] = useState(true);
   const [working, setWorking] = useState(false);
   const [error, setError] = useState('');
+  const [notice, setNotice] = useState('');
+  const [isDragging, setIsDragging] = useState(false);
   const [mobileNav, setMobileNav] = useState(false);
   const [search, setSearch] = useState('');
   const [assetFilter, setAssetFilter] = useState('All');
@@ -519,6 +587,7 @@ export function StudioApp() {
     setMessages([]);
     setDraft('');
     setFiles([]);
+    setNotice('');
     setView('chat');
     setMobileNav(false);
     setTimeout(() => textareaRef.current?.focus(), 50);
@@ -632,6 +701,7 @@ export function StudioApp() {
   const uploadFiles = useCallback(async (activeProject: StudioProject, selectedFiles: File[], role: string) => {
     let nextProject = activeProject;
     const uploadedMessages: StudioMessage[] = [];
+    let lastAttachmentId: string | undefined;
     for (const file of selectedFiles) {
       const form = new FormData();
       form.append('projectId', nextProject.id);
@@ -639,13 +709,13 @@ export function StudioApp() {
       form.append('file', file);
       form.append('role', role);
       const response = await fetch('/api/files', { method: 'POST', body: form });
-      const data = await response.json() as { project?: StudioProject; message?: StudioMessage; error?: string };
+      const data = await response.json() as { project?: StudioProject; attachment?: StudioProject['attachments'][number]; message?: StudioMessage; error?: string };
       if (!response.ok || !data.project) throw new Error(data.error || `“${file.name}” could not be stored.`);
       nextProject = data.project;
+      lastAttachmentId = data.attachment?.id ?? data.message?.metadata?.attachmentId ?? lastAttachmentId;
       if (data.message) uploadedMessages.push(data.message);
     }
-    setProject(nextProject);
-    setMessages((current) => [...current, ...uploadedMessages]);
+    return { project: nextProject, messages: uploadedMessages, lastAttachmentId };
   }, []);
 
   const importProject = useCallback(async (file: File) => {
@@ -685,28 +755,56 @@ export function StudioApp() {
   const submitInstruction = useCallback(async (instruction: string, selectedFiles: File[] = []) => {
     const content = instruction.trim();
     if ((!content && selectedFiles.length === 0) || working) return;
+    const localDocumentAction = project && selectedFiles.length === 0 ? requestedDocumentAction(content) : null;
+    if (project && localDocumentAction) {
+      const document = getProductionDocument(project, localDocumentAction.kind, localDocumentAction.sequenceNumber);
+      if (document) {
+        try {
+          if (localDocumentAction.action === 'copy') await navigator.clipboard.writeText(document.content);
+          else downloadText(document.filename, document.content);
+          setDraft('');
+          setNotice(`${documentLabels[localDocumentAction.kind]} ${localDocumentAction.action === 'copy' ? 'copied' : 'downloaded'} as a clean document.`);
+          window.setTimeout(() => setNotice(''), 2600);
+          return;
+        } catch {
+          setError(`The ${documentLabels[localDocumentAction.kind].toLowerCase()} could not be copied.`);
+          return;
+        }
+      }
+    }
     setWorking(true);
     setError('');
+    setNotice('');
     try {
       const fallbackContent = selectedFiles.length ? 'Store these references in this project.' : '';
+      const role = /my (photo|picture|image)|likeness|main character/i.test(content) ? 'Main character likeness reference' : 'Production reference';
+      const uploaded = project && selectedFiles.length
+        ? await uploadFiles(project, selectedFiles, role)
+        : null;
+      const instructionProject = uploaded?.project ?? project;
       const response = await fetch('/api/studio', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ projectId: project?.id, expectedRevision: project?.storageRevision, message: content || fallbackContent }),
+        body: JSON.stringify({ projectId: instructionProject?.id, expectedRevision: instructionProject?.storageRevision, message: content || fallbackContent, attachmentId: uploaded?.lastAttachmentId }),
       });
       const data = await response.json() as { project?: StudioProject; messages?: StudioMessage[]; projects?: ProjectSummary[]; error?: string; sideEffect?: string };
       if (!response.ok || !data.project) throw new Error(data.error || 'The instruction could not be applied.');
-      setProject(data.project);
-      setMessages((current) => project ? [...current, ...(data.messages ?? [])] : (data.messages ?? []));
-      setProjects(data.projects ?? projects);
-      if (selectedFiles.length) {
-        const role = /my (photo|picture|image)|likeness|main character/i.test(content) ? 'Main character likeness reference' : 'Production reference';
-        await uploadFiles(data.project, selectedFiles, role);
+      let finalProject = data.project;
+      let finalMessages = data.messages ?? [];
+      if (!project && selectedFiles.length) {
+        const postCreateUpload = await uploadFiles(data.project, selectedFiles, role);
+        finalProject = postCreateUpload.project;
+        finalMessages = [...finalMessages, ...postCreateUpload.messages];
+      } else if (uploaded) {
+        finalMessages = [...uploaded.messages, ...finalMessages];
       }
+      setProject(finalProject);
+      setMessages((current) => project ? [...current, ...finalMessages] : finalMessages);
+      setProjects(data.projects ?? projects);
       setDraft('');
       setFiles([]);
-      if (data.sideEffect === 'export') window.setTimeout(() => downloadExport(data.project!.id), 300);
-      if (data.sideEffect === 'asset-export') window.setTimeout(() => void downloadAssets(data.project!.id), 300);
+      if (data.sideEffect === 'export') window.setTimeout(() => downloadExport(finalProject.id), 300);
+      if (data.sideEffect === 'asset-export') window.setTimeout(() => void downloadAssets(finalProject.id), 300);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'The instruction could not be applied.');
     } finally {
@@ -729,6 +827,32 @@ export function StudioApp() {
   const onAction = (message: string) => {
     setView('chat');
     void submitInstruction(message);
+  };
+
+  const editDocument = (kind: ProductionDocumentKind, sequenceNumber?: number) => {
+    const target = sequenceNumber ? `${documentLabels[kind]} for Sequence ${sequenceNumber}` : documentLabels[kind];
+    setDraft(`Revise the ${target}: `);
+    setView('chat');
+    window.setTimeout(() => textareaRef.current?.focus(), 50);
+  };
+
+  const addComposerFiles = useCallback((incoming: File[]) => {
+    const accepted = incoming.filter((file) => !file.type.startsWith('audio/'));
+    if (accepted.length !== incoming.length) setError('Audio files are not accepted. Seedance handles dialogue and sound inside generated video.');
+    setFiles((current) => [...current, ...accepted]);
+  }, []);
+
+  const onComposerDrop = (event: DragEvent<HTMLTextAreaElement>) => {
+    event.preventDefault();
+    setIsDragging(false);
+    addComposerFiles(Array.from(event.dataTransfer.files));
+  };
+
+  const onComposerPaste = (event: ClipboardEvent<HTMLTextAreaElement>) => {
+    const pastedFiles = Array.from(event.clipboardData.files).filter((file) => file.type.startsWith('image/'));
+    if (!pastedFiles.length) return;
+    if (!event.clipboardData.getData('text')) event.preventDefault();
+    addComposerFiles(pastedFiles);
   };
 
   const updateProject = async (body: Record<string, unknown>) => {
@@ -813,7 +937,7 @@ export function StudioApp() {
         </header>
 
         {booting ? <LoadingSurface /> : view === 'chat' ? (
-          <ChatView project={project} messages={messages} working={working} error={error} onAction={onAction} onOpenLibrary={() => setView('assets')} onExport={() => downloadExport()} onAssetExport={() => void downloadAssets()} endRef={messagesEndRef} />
+          <ChatView project={project} messages={messages} working={working} error={error} onAction={onAction} onEdit={editDocument} onRequestFiles={() => { setDraft('Use these as my main character references.'); fileInputRef.current?.click(); }} onOpenLibrary={() => setView('assets')} onExport={() => downloadExport()} onAssetExport={() => void downloadAssets()} endRef={messagesEndRef} />
         ) : view === 'projects' ? (
           <ProjectsView projects={filteredProjects} search={search} setSearch={setSearch} searchRef={searchRef} onOpen={loadProject} onNew={startNewMovie} onImport={() => importInputRef.current?.click()} />
         ) : view === 'assets' ? (
@@ -828,18 +952,23 @@ export function StudioApp() {
 
         {view === 'chat' && (
           <div className="pointer-events-none absolute inset-x-0 bottom-0 z-20 bg-gradient-to-t from-background via-background to-transparent px-3 pb-3 pt-16 sm:px-6 sm:pb-5">
-            <form onSubmit={onSubmit} className="composer pointer-events-auto mx-auto w-full max-w-[780px] rounded-[20px] border bg-card p-2.5 transition">
-              {files.length > 0 && <div className="flex flex-wrap gap-1.5 px-2 pb-2">{files.map((file, index) => <span key={`${file.name}-${index}`} className="flex items-center gap-1.5 rounded-full border border-border bg-secondary px-2.5 py-1 text-[10px]"><Paperclip className="size-3" /><span className="max-w-40 truncate">{file.name}</span><button type="button" onClick={() => setFiles((current) => current.filter((_, itemIndex) => itemIndex !== index))} aria-label={`Remove ${file.name}`}><X className="size-3 text-muted-foreground hover:text-foreground" /></button></span>)}</div>}
+            {notice && <p aria-live="polite" className="pointer-events-auto mx-auto mb-2 w-fit rounded-full border border-emerald-400/20 bg-background/95 px-3 py-1.5 text-[10px] text-emerald-200 shadow-lg">{notice}</p>}
+            <form onSubmit={onSubmit} className="pointer-events-auto mx-auto w-full max-w-[780px]">
+              <fieldset className={cn('composer relative min-w-0 rounded-[20px] border bg-card p-2.5 transition', isDragging && 'border-amber-300/60 ring-2 ring-amber-300/20')}>
+              <legend className="sr-only">Movie assistant message composer</legend>
+              {isDragging && <div className="pointer-events-none absolute inset-1 z-10 grid place-items-center rounded-[16px] border border-dashed border-amber-300/50 bg-background/95 text-sm font-medium text-amber-100">Drop references into this message</div>}
+              {files.length > 0 && <ComposerAttachments files={files} onRemove={(index) => setFiles((current) => current.filter((_, itemIndex) => itemIndex !== index))} />}
               <label htmlFor="movie-idea" className="sr-only">{project ? 'Tell the studio what to do' : 'Describe your movie'}</label>
-              <textarea ref={textareaRef} id="movie-idea" rows={2} value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={onComposerKeyDown} placeholder={project ? 'Ask for a change, show an asset, or continue the movie…' : 'Describe the movie you want to make…'} className="max-h-40 min-h-[54px] w-full resize-none bg-transparent px-2.5 py-2 text-[15px] leading-6 outline-none placeholder:text-muted-foreground/65" />
+              <textarea ref={textareaRef} id="movie-idea" rows={2} value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={onComposerKeyDown} onPaste={onComposerPaste} onDragEnter={(event) => { event.preventDefault(); setIsDragging(true); }} onDragOver={(event) => { event.preventDefault(); setIsDragging(true); }} onDragLeave={() => setIsDragging(false)} onDrop={onComposerDrop} placeholder={project ? 'Ask for a change, attach references, or continue the movie…' : 'Describe the movie you want to make…'} className="max-h-40 min-h-[54px] w-full resize-none bg-transparent px-2.5 py-2 text-[15px] leading-6 outline-none placeholder:text-muted-foreground/65" />
               <div className="flex items-center justify-between pt-1">
                 <div className="flex items-center gap-1">
-                  <input ref={fileInputRef} type="file" multiple className="sr-only" accept="image/*,video/*,.pdf,.doc,.docx,.txt" onChange={(event) => setFiles((current) => [...current, ...Array.from(event.target.files ?? [])])} />
+                  <input ref={fileInputRef} type="file" multiple className="sr-only" accept="image/*,video/*,.pdf,.doc,.docx,.txt" onChange={(event) => { addComposerFiles(Array.from(event.target.files ?? [])); event.target.value = ''; }} />
                   <Button type="button" variant="ghost" size="icon" className="rounded-full" onClick={() => fileInputRef.current?.click()} aria-label="Attach reference"><Paperclip className="size-[18px]" strokeWidth={1.7} /></Button>
-                  {project && <span className="ml-1 hidden text-[10px] text-muted-foreground sm:inline">Try /assets, “show Asset 007”, “download all assets”</span>}
+                  <span className="ml-1 hidden text-[10px] text-muted-foreground sm:inline">Attach many · drag & drop · paste images</span>
                 </div>
                 <Button type="submit" size="icon" disabled={working || (!draft.trim() && files.length === 0)} className="size-9 rounded-full" aria-label="Send instruction">{working ? <LoaderCircle className="animate-spin" /> : <ArrowUp className="size-[18px]" strokeWidth={2} />}</Button>
               </div>
+              </fieldset>
             </form>
             <p className="mt-2 text-center text-[10px] text-muted-foreground/65">Ctrl + Enter to send · Ctrl + N for a new movie</p>
           </div>
@@ -853,7 +982,7 @@ function LoadingSurface() {
   return <div className="grid flex-1 place-items-center"><div className="flex items-center gap-2 text-sm text-muted-foreground"><LoaderCircle className="size-4 animate-spin" />Opening project memory…</div></div>;
 }
 
-function ChatView({ project, messages, working, error, onAction, onOpenLibrary, onExport, onAssetExport, endRef }: { project: StudioProject | null; messages: StudioMessage[]; working: boolean; error: string; onAction: (message: string) => void; onOpenLibrary: () => void; onExport: () => void; onAssetExport: () => void; endRef: React.RefObject<HTMLDivElement | null> }) {
+function ChatView({ project, messages, working, error, onAction, onEdit, onRequestFiles, onOpenLibrary, onExport, onAssetExport, endRef }: { project: StudioProject | null; messages: StudioMessage[]; working: boolean; error: string; onAction: (message: string) => void; onEdit: (kind: ProductionDocumentKind, sequenceNumber?: number) => void; onRequestFiles: () => void; onOpenLibrary: () => void; onExport: () => void; onAssetExport: () => void; endRef: React.RefObject<HTMLDivElement | null> }) {
   if (!project && messages.length === 0) return (
     <div className="min-h-0 flex-1 overflow-y-auto">
       <div className="mx-auto flex min-h-full w-full max-w-[780px] flex-col items-center justify-center px-5 pb-40 pt-16 text-center sm:px-8">
@@ -868,7 +997,7 @@ function ChatView({ project, messages, working, error, onAction, onOpenLibrary, 
   return (
     <div className="min-h-0 flex-1 overflow-y-auto scroll-smooth">
       <div className="mx-auto w-full max-w-[780px] space-y-7 px-4 pb-48 pt-8 sm:px-6 sm:pt-12">
-        {messages.map((item) => <MessageItem key={item.id} item={item} project={project!} onAction={onAction} onOpenLibrary={onOpenLibrary} onExport={onExport} onAssetExport={onAssetExport} />)}
+        {messages.map((item) => <MessageItem key={item.id} item={item} project={project!} onAction={onAction} onEdit={onEdit} onRequestFiles={onRequestFiles} onOpenLibrary={onOpenLibrary} onExport={onExport} onAssetExport={onAssetExport} />)}
         {working && <div className="flex items-center gap-3"><span className="brand-mark grid size-7 place-items-center rounded-lg"><Clapperboard className="size-3.5" /></span><div className="flex gap-1.5"><span className="size-1.5 animate-pulse rounded-full bg-muted-foreground" /><span className="size-1.5 animate-pulse rounded-full bg-muted-foreground [animation-delay:120ms]" /><span className="size-1.5 animate-pulse rounded-full bg-muted-foreground [animation-delay:240ms]" /></div></div>}
         {error && <p className="rounded-xl border border-rose-400/20 bg-rose-400/10 px-4 py-2 text-xs text-rose-200">{error}</p>}
         <div ref={endRef} />
@@ -944,9 +1073,10 @@ function AdvancedControlView({ project, working, onAction, onCleanup, onNew }: {
 
 function SettingsView({ project, lightMode, setLightMode, onUpdate }: { project: StudioProject | null; lightMode: boolean; setLightMode: (value: boolean) => void; onUpdate: (settings: Partial<StudioProject['settings']>) => void }) {
   const settingSections = [
-    { title: 'AI Brain', icon: Sparkles, description: 'Automatic Mode interprets instructions and chooses the normal next production step.', control: <Switch checked={project?.settings.automaticMode ?? true} onCheckedChange={(checked) => onUpdate({ automaticMode: checked })} disabled={!project} /> },
+    { title: 'Studio access', icon: Sparkles, description: 'Direct project access with no Continuity Studio account or extra sign-in. A live Codex brain is supplied by the local Codex app-server host when that bridge is configured.', control: <Badge variant="outline" className="border-emerald-400/20 bg-emerald-400/10 text-emerald-200">No sign-in gate</Badge> },
+    { title: 'Approval behavior', icon: ShieldCheck, description: 'Choose how non-paid planning advances. Generation remains separately protected.', control: <select aria-label="Approval behavior" disabled={!project} value={project?.settings.approvalMode ?? 'automatic'} onChange={(event) => { const approvalMode = event.target.value as StudioProject['settings']['approvalMode']; onUpdate({ approvalMode, automaticMode: approvalMode === 'automatic', pipelineApprovalGranted: false }); }} className="h-9 rounded-lg border border-border bg-background px-3 text-xs outline-none"><option value="automatic">Automatic</option><option value="master">Master</option><option value="manual">Manual</option></select> },
     { title: 'Image Generation', icon: ImageIcon, description: project?.settings.imageProvider === 'Not connected' ? 'No image provider connected. Prompts and references remain safe until you choose one.' : project?.settings.imageProvider ?? 'Not connected', control: <Badge variant="outline">Not connected</Badge> },
-    { title: 'Video Generation', icon: Film, description: 'Provider-neutral Seedance packages adapt only after duration, resolution, reference count, in-video sound, prompt, image-to-video, and cost limits are known. No separate sound library exists.', control: <Badge variant="outline" className="border-sky-400/20 bg-sky-400/10 text-sky-200">Package ready</Badge> },
+    { title: 'Video Generation', icon: Film, description: 'Provider-neutral Seedance packages include dialogue and sound. Video begins only after an explicit Generate command and a paid-attempt confirmation.', control: <Badge variant="outline" className="border-amber-400/20 bg-amber-400/10 text-amber-200">Explicit only</Badge> },
     { title: 'Storage', icon: Upload, description: 'Structured project memory and original media are stored separately and isolated by project ID.', control: <Badge variant="outline">Private</Badge> },
     { title: 'Appearance', icon: lightMode ? Sun : Moon, description: 'Choose the interface contrast for this device.', control: <Switch checked={lightMode} onCheckedChange={setLightMode} /> },
     { title: 'Privacy', icon: Lock, description: 'Media is sent to a provider only when you request generation. API keys never enter exports.', control: <Switch checked={project?.settings.privacyMode ?? true} onCheckedChange={(checked) => onUpdate({ privacyMode: checked })} disabled={!project} /> },

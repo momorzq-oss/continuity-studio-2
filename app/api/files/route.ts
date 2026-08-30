@@ -1,4 +1,5 @@
 import { ensureSchema, getRuntimeEnv } from '@/db/runtime';
+import { decodeProjectState, encodeProjectState } from '@/lib/project-state-codec';
 import { refreshProductionSystem } from '@/lib/production-system';
 import { assetProductionReference, normalizeProject, nowIso, type StudioMessage, type StudioProject } from '@/lib/studio';
 
@@ -60,7 +61,7 @@ export async function POST(request: Request) {
       .first<{ state_json: string; revision: number }>();
     if (!row) return Response.json({ error: 'Open a project before adding references.' }, { status: 404 });
 
-    const project = normalizeProject(JSON.parse(row.state_json) as StudioProject);
+    const project = normalizeProject(await decodeProjectState<StudioProject>(row.state_json));
     project.storageRevision = row.revision;
     const expectedRevisionValue = form.get('expectedRevision');
     const expectedRevision = typeof expectedRevisionValue === 'string' ? Number(expectedRevisionValue) : row.revision;
@@ -122,6 +123,7 @@ export async function POST(request: Request) {
         character.referenceCoverage.continuity = Math.min(100, character.referenceCoverage.continuity + 20);
         attachment.linkedAssetId = character.id;
         attachment.linkedAssetNumber = character.projectNumber;
+        attachment.identityGroupId = 'CHARACTER_IDENTITY_001';
         assetId = `${project.id}:${character.id}`;
         coverageAsset = character;
       }
@@ -143,6 +145,7 @@ export async function POST(request: Request) {
     project.production.control.changeLog.push({ id: changeId, revision: project.storageRevision, scope: 'file', summary, createdAt });
     project.production.autosave.recoverySnapshotCount += 1;
     project.production.autosave.lastRecoveryReason = summary;
+    const encodedProject = await encodeProjectState(project);
     const statements = [
       DB.prepare(`INSERT INTO transaction_guards (id, project_id, revision_ok, created_at)
         SELECT ?, ?, CASE WHEN revision = ? THEN 1 ELSE 0 END, ? FROM project_transactions WHERE project_id = ?`)
@@ -167,7 +170,7 @@ export async function POST(request: Request) {
         attachment.byteSize, 'Verified', createdAt,
       ),
       DB.prepare('UPDATE projects SET state_json = ?, updated_at = ? WHERE id = ?')
-        .bind(JSON.stringify(project), createdAt, projectId),
+        .bind(encodedProject, createdAt, projectId),
       DB.prepare('UPDATE project_transactions SET revision = ?, last_transaction_id = ?, updated_at = ? WHERE project_id = ?')
         .bind(project.storageRevision, transactionId, createdAt, projectId),
       DB.prepare(`INSERT INTO production_change_log

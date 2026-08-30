@@ -1,0 +1,198 @@
+# Theme
+
+## Compact token summary
+
+- Framework: Vinext/Next-compatible React 19 with Tailwind CSS 4.
+- Components: shadcn/Base UI primitives; Lucide icons.
+- Font: Geist Sans (`--font-geist-sans`); Geist Mono (`--font-geist-mono`).
+- Base radius: `0.625rem`; semantic sizes scale from 0.6× to 2.6×.
+- Dark background: `oklch(0.108 0.012 255)`.
+- Dark card: `oklch(0.16 0.015 255)`.
+- Dark foreground: `oklch(0.945 0.01 90)`.
+- Primary amber: `oklch(0.72 0.16 64)`.
+- Muted surface: `oklch(0.205 0.017 255)`.
+- Muted text: `oklch(0.66 0.015 250)`.
+- Border: translucent white at 8%; input at 12%.
+- Ready: `oklch(0.77 0.16 145)`.
+- App shell: 100dvh, hidden body overflow; internal surfaces scroll.
+- Distinctive treatments: quiet film grain, amber brand mark, radial ambient background, deep floating composer shadow.
+- Responsive breakpoint behavior uses Tailwind defaults; the primary layout switches at `md`.
+
+## Raw `app/globals.css`
+
+```css
+@import 'tailwindcss';
+@import 'tw-animate-css';
+@import 'shadcn/tailwind.css';
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+  --font-heading: var(--font-sans);
+  --color-sidebar-ring: var(--sidebar-ring);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar: var(--sidebar);
+  --color-chart-5: var(--chart-5);
+  --color-chart-4: var(--chart-4);
+  --color-chart-3: var(--chart-3);
+  --color-chart-2: var(--chart-2);
+  --color-chart-1: var(--chart-1);
+  --color-ring: var(--ring);
+  --color-input: var(--input);
+  --color-border: var(--border);
+  --color-destructive: var(--destructive);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-accent: var(--accent);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-muted: var(--muted);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-secondary: var(--secondary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-primary: var(--primary);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-popover: var(--popover);
+  --color-card-foreground: var(--card-foreground);
+  --color-card: var(--card);
+  --radius-sm: calc(var(--radius) * 0.6);
+  --radius-md: calc(var(--radius) * 0.8);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) * 1.4);
+  --radius-2xl: calc(var(--radius) * 1.8);
+  --radius-3xl: calc(var(--radius) * 2.2);
+  --radius-4xl: calc(var(--radius) * 2.6);
+}
+
+body { font-family: var(--font-geist-sans), Arial, Helvetica, sans-serif; }
+
+:root {
+  --background: oklch(0.975 0.008 82);
+  --foreground: oklch(0.19 0.018 255);
+  --card: oklch(0.995 0.004 82);
+  --card-foreground: oklch(0.19 0.018 255);
+  --popover: oklch(0.995 0.004 82);
+  --popover-foreground: oklch(0.19 0.018 255);
+  --primary: oklch(0.55 0.15 58);
+  --primary-foreground: oklch(0.985 0.008 82);
+  --secondary: oklch(0.93 0.014 78);
+  --secondary-foreground: oklch(0.24 0.02 255);
+  --muted: oklch(0.93 0.012 78);
+  --muted-foreground: oklch(0.49 0.025 255);
+  --accent: oklch(0.91 0.025 69);
+  --accent-foreground: oklch(0.24 0.02 255);
+  --destructive: oklch(0.577 0.245 27.325);
+  --border: oklch(0.84 0.018 78);
+  --input: oklch(0.84 0.018 78);
+  --ring: oklch(0.55 0.15 58);
+  --chart-1: oklch(0.55 0.15 58);
+  --chart-2: oklch(0.54 0.11 200);
+  --chart-3: oklch(0.56 0.12 137);
+  --chart-4: oklch(0.52 0.13 305);
+  --chart-5: oklch(0.58 0.14 29);
+  --radius: 0.625rem;
+  --sidebar: oklch(0.95 0.012 80);
+  --sidebar-foreground: oklch(0.19 0.018 255);
+  --sidebar-primary: oklch(0.55 0.15 58);
+  --sidebar-primary-foreground: oklch(0.985 0.008 82);
+  --sidebar-accent: oklch(0.91 0.02 76);
+  --sidebar-accent-foreground: oklch(0.24 0.02 255);
+  --sidebar-border: oklch(0.84 0.018 78);
+  --sidebar-ring: oklch(0.55 0.15 58);
+  --ambient: oklch(0.66 0.11 68 / 10%);
+  --ready: oklch(0.58 0.14 145);
+}
+
+.dark {
+  --background: oklch(0.108 0.012 255);
+  --foreground: oklch(0.945 0.01 90);
+  --card: oklch(0.16 0.015 255);
+  --card-foreground: oklch(0.96 0.008 90);
+  --popover: oklch(0.155 0.014 255);
+  --popover-foreground: oklch(0.96 0.008 90);
+  --primary: oklch(0.72 0.16 64);
+  --primary-foreground: oklch(0.13 0.02 58);
+  --secondary: oklch(0.205 0.017 255);
+  --secondary-foreground: oklch(0.92 0.01 90);
+  --muted: oklch(0.205 0.017 255);
+  --muted-foreground: oklch(0.66 0.015 250);
+  --accent: oklch(0.235 0.024 252);
+  --accent-foreground: oklch(0.96 0.008 90);
+  --destructive: oklch(0.66 0.19 24);
+  --border: oklch(1 0 0 / 8%);
+  --input: oklch(1 0 0 / 12%);
+  --ring: oklch(0.72 0.16 64);
+  --chart-1: oklch(0.72 0.16 64);
+  --chart-2: oklch(0.68 0.12 192);
+  --chart-3: oklch(0.73 0.14 130);
+  --chart-4: oklch(0.66 0.16 300);
+  --chart-5: oklch(0.68 0.15 30);
+  --sidebar: oklch(0.13 0.014 255);
+  --sidebar-foreground: oklch(0.92 0.01 90);
+  --sidebar-primary: oklch(0.72 0.16 64);
+  --sidebar-primary-foreground: oklch(0.13 0.02 58);
+  --sidebar-accent: oklch(0.205 0.017 255);
+  --sidebar-accent-foreground: oklch(0.96 0.008 90);
+  --sidebar-border: oklch(1 0 0 / 7%);
+  --sidebar-ring: oklch(0.72 0.16 64);
+  --ambient: oklch(0.58 0.1 66 / 7%);
+  --ready: oklch(0.77 0.16 145);
+}
+
+@layer base {
+  * { @apply border-border outline-ring/50; }
+  body { @apply bg-background text-foreground; }
+  html { @apply font-sans; }
+}
+
+html, body { height: 100%; }
+body { overflow: hidden; }
+::selection { background: oklch(0.72 0.16 64 / 30%); }
+
+.film-grain::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 50;
+  opacity: 0.025;
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 180 180' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='.55'/%3E%3C/svg%3E");
+}
+
+.brand-mark {
+  color: oklch(0.84 0.12 70);
+  border: 1px solid oklch(0.78 0.14 65 / 25%);
+  background: linear-gradient(145deg, oklch(0.26 0.045 60), oklch(0.15 0.02 255));
+  box-shadow: inset 0 1px 0 oklch(1 0 0 / 7%);
+}
+
+.icon-stage {
+  border-color: oklch(0.75 0.13 65 / 25%);
+  color: oklch(0.82 0.13 70);
+  background: linear-gradient(145deg, oklch(0.22 0.035 61 / 65%), oklch(0.15 0.02 255 / 80%));
+  box-shadow: 0 18px 60px -28px oklch(0.72 0.16 64 / 70%), inset 0 1px 0 oklch(1 0 0 / 7%);
+}
+
+.eyebrow {
+  font-size: 10px;
+  font-weight: 650;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: oklch(0.72 0.1 67);
+}
+
+.composer {
+  border-color: oklch(1 0 0 / 11%);
+  background: linear-gradient(180deg, oklch(0.175 0.016 255 / 97%), oklch(0.145 0.016 255 / 99%));
+  box-shadow: 0 0 0 1px oklch(0 0 0 / 25%), 0 30px 80px -35px oklch(0 0 0 / 90%);
+}
+```
+
+There is no Tailwind config file; Tailwind 4 tokens are defined in `app/globals.css`.

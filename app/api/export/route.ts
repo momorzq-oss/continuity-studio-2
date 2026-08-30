@@ -3,12 +3,19 @@ import { strToU8 } from 'fflate';
 import { ensureSchema, getRuntimeEnv } from '@/db/runtime';
 import { createVerifiedArchive } from '@/lib/archive-verification';
 import { collectFlatGeneratedAssets, flatAssetManifest } from '@/lib/flat-asset-export';
+import { decodeProjectState, encodeProjectState } from '@/lib/project-state-codec';
 import { normalizeProject, nowIso, type StudioProject } from '@/lib/studio';
 
 export const runtime = 'edge';
 
 function safeName(value: string) {
   return value.replace(/[^a-zA-Z0-9_-]+/g, '_').replace(/_+/g, '_').replace(/^_|_$/g, '') || 'Continuity_Project';
+}
+
+function safeFileName(value: string) {
+  const extension = value.match(/\.([a-zA-Z0-9]{1,10})$/)?.[1]?.toLowerCase();
+  const stem = extension ? value.slice(0, -(extension.length + 1)) : value;
+  return `${safeName(stem)}${extension ? `.${extension}` : ''}`;
 }
 
 function text(value: unknown) {
@@ -33,7 +40,7 @@ export async function GET(request: Request) {
       .bind(projectId)
       .first<{ state_json: string; revision: number }>();
     if (!row) return Response.json({ error: 'That project is no longer available.' }, { status: 404 });
-    const project = normalizeProject(JSON.parse(row.state_json) as StudioProject);
+    const project = normalizeProject(await decodeProjectState<StudioProject>(row.state_json));
     project.storageRevision = row.revision;
     const messages = await DB.prepare(
       'SELECT id, role, content, metadata_json, created_at FROM chat_messages WHERE project_id = ? ORDER BY created_at ASC',
@@ -175,14 +182,22 @@ export async function GET(request: Request) {
     }
     for (const reference of references.results) {
       const bytes = referenceBytes.get(reference.id);
-      if (bytes) files[`${root}/source_references/${reference.id}_${safeName(reference.original_name)}`] = bytes;
+      if (bytes) files[`${root}/source_references/${reference.id}_${safeFileName(reference.original_name)}`] = bytes;
+    }
+    for (const source of project.production.control.finalSourceMap) {
+      const referenceId = source.resultMediaKey.replace(/^reference:/, '').split('#')[0];
+      const reference = references.results.find((item) => item.id === referenceId);
+      const bytes = referenceBytes.get(referenceId);
+      if (!reference || !bytes) continue;
+      const extension = reference.original_name.match(/\.([a-zA-Z0-9]{1,10})$/)?.[1]?.toLowerCase() ?? 'mp4';
+      files[`${root}/sequence_results/SEQUENCE_${String(source.sequenceNumber).padStart(3, '0')}_RESULT.${extension}`] = bytes;
     }
     for (const snapshot of recoverySnapshots.results) {
       files[`${root}/recovery/${snapshot.created_at.replace(/[:.]/g, '-')}_${snapshot.id}.json`] = text({
         id: snapshot.id,
         reason: snapshot.reason,
         createdAt: snapshot.created_at,
-        state: JSON.parse(snapshot.state_json),
+        state: await decodeProjectState<StudioProject>(snapshot.state_json),
       });
     }
     const { zipped, verification } = await createVerifiedArchive(files, `${root}/reports/ARCHIVE_MANIFEST.json`);
@@ -203,6 +218,7 @@ export async function GET(request: Request) {
     const archiveVerification = { id: `archive_verification_${crypto.randomUUID()}`, kind: 'full-project' as const, expectedFileCount: verification.expectedFileCount, verifiedFileCount: verification.verifiedFileCount, status: verification.status, manifestHash: verification.manifestHash, verifiedAt: createdAt };
     project.production.control.archiveVerifications.push(archiveVerification);
     project.production.control.changeLog.push({ id: changeId, revision: project.storageRevision, scope: 'export', summary, createdAt });
+    const encodedProject = await encodeProjectState(project);
     await DB.batch([
       DB.prepare(`INSERT INTO transaction_guards (id, project_id, revision_ok, created_at)
         SELECT ?, ?, CASE WHEN revision = ? THEN 1 ELSE 0 END, ? FROM project_transactions WHERE project_id = ?`)
@@ -212,7 +228,7 @@ export async function GET(request: Request) {
       DB.prepare('INSERT INTO export_jobs (id, project_id, status, media_key, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)')
         .bind(exportId, projectId, 'Completed', mediaKey, createdAt, createdAt),
       DB.prepare('UPDATE projects SET export_status = ?, state_json = ?, updated_at = ? WHERE id = ?')
-        .bind(project.exportStatus, JSON.stringify(project), createdAt, projectId),
+        .bind(project.exportStatus, encodedProject, createdAt, projectId),
       DB.prepare('UPDATE project_transactions SET revision = ?, last_transaction_id = ?, updated_at = ? WHERE project_id = ?')
         .bind(project.storageRevision, transactionId, createdAt, projectId),
       DB.prepare('INSERT INTO production_change_log (id, project_id, revision, scope, summary, before_snapshot_id, after_state_hash, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')

@@ -245,6 +245,7 @@ export interface GenerationSnapshot {
   referencePackageId: string;
   selectedReferenceIds: string[];
   exactReferenceOrder: Array<{ id: string; uploadOrder: number; fileName: string }>;
+  assetVersions: Array<{ assetId: string; assetNumber: number; version: number; generatedAttachmentId: string | null }>;
   compiledPrompt: string;
   structuredStateHash: string;
   provider: string;
@@ -278,8 +279,10 @@ function categoryRole(asset: StudioAsset): VisualReferenceBinding['role'] {
   return 'Critical prop';
 }
 
-function currentCostumes(project: StudioProject, speaker: StudioAsset) {
-  return project.assets.filter((asset) => asset.category === 'Costumes' && asset.sequences.some((number) => speaker.sequences.includes(number))).map((asset) => asset.projectNumber);
+function currentCostumes(project: StudioProject, speaker: StudioAsset, sequence?: StudioSequence) {
+  return project.assets.filter((asset) => asset.category === 'Costumes'
+    && asset.sequences.some((number) => speaker.sequences.includes(number))
+    && (!sequence || asset.sequences.includes(sequence.number))).map((asset) => asset.projectNumber);
 }
 
 function dialogueDuration(text: string) {
@@ -294,12 +297,14 @@ export function normalizeDialogueLines(project: StudioProject, sequence: StudioS
     const raw = (rawValue && typeof rawValue === 'object' ? rawValue : {}) as Partial<DialogueLine> & { accent?: string };
     const speaker = project.assets.find((asset) => asset.id === raw.speakerAssetId || asset.projectNumber === raw.speakerAssetNumber) ?? project.assets.find((asset) => asset.category === 'Characters');
     if (!speaker) return null;
+    const speakerState = project.production?.characterStates?.[speaker.id];
+    const projectDialect = project.production?.control?.languageLocks?.projectDialect;
     const exactDialogue = String(raw.exactDialogue ?? '').trim();
     const durationSeconds = Number(raw.durationSeconds ?? dialogueDuration(exactDialogue));
     const startSecond = Number(raw.startSecond ?? cursor);
     const endSecond = Number(Math.min(sequence.duration, raw.endSecond ?? startSecond + durationSeconds).toFixed(2));
     cursor = endSecond + Number(raw.pauseAfterSeconds ?? 0.35);
-    const costumes = raw.currentCostumeAssetNumbers?.length ? raw.currentCostumeAssetNumbers : currentCostumes(project, speaker);
+    const costumes = raw.currentCostumeAssetNumbers?.length ? raw.currentCostumeAssetNumbers : currentCostumes(project, speaker, sequence);
     const bindings: VisualReferenceBinding[] = raw.requiredVisualReferences?.length ? raw.requiredVisualReferences : [
       { role: 'Identity', assetId: speaker.id, assetNumber: speaker.projectNumber, fileName: speaker.generatedFileName, reason: 'Exact approved speaker identity' },
       ...costumes.map((assetNumber) => {
@@ -312,9 +317,9 @@ export function normalizeDialogueLines(project: StudioProject, sequence: StudioS
       id, dialogueId: raw.dialogueId ?? id, sequenceNumber: sequence.number, turnOrder: raw.turnOrder ?? index + 1,
       turnType: raw.turnType ?? (index === 0 ? 'Line' : 'Response'), exactDialogue, speakerAssetId: speaker.id,
       speakerAssetNumber: speaker.projectNumber, speakerName: speaker.name, speakerVariant: raw.speakerVariant ?? 'Permanent identity with current scene state',
-      currentCostumeAssetNumbers: costumes, language: raw.language ?? project.dialogueLanguage, dialect: raw.dialect ?? raw.accent ?? 'Character and region appropriate',
-      languageLock: raw.languageLock ?? raw.language ?? project.dialogueLanguage,
-      dialectLock: raw.dialectLock ?? raw.dialect ?? raw.accent ?? 'Character and region appropriate',
+      currentCostumeAssetNumbers: costumes, language: raw.language ?? speakerState?.languageLock ?? project.dialogueLanguage, dialect: raw.dialect ?? raw.accent ?? speakerState?.dialectLock ?? projectDialect ?? 'Character and region appropriate',
+      languageLock: raw.languageLock ?? raw.language ?? speakerState?.languageLock ?? project.dialogueLanguage,
+      dialectLock: raw.dialectLock ?? raw.dialect ?? raw.accent ?? speakerState?.dialectLock ?? projectDialect ?? 'Character and region appropriate',
       pronunciations: raw.pronunciations ?? [],
       emotion: raw.emotion ?? 'Story-appropriate controlled performance', expression: raw.expression ?? 'Readable, motivated expression',
       physicalAction: raw.physicalAction ?? 'Maintain authored blocking, eyeline, hand state, and object ownership while speaking.',
@@ -384,17 +389,15 @@ function defaultActions(project: StudioProject, sequence: StudioSequence): Produ
   const primary = project.assets.find((asset) => sequence.assetIds.includes(asset.id) && asset.category === 'Characters')
     ?? project.assets.find((asset) => sequence.assetIds.includes(asset.id));
   if (!primary) return [];
-  const props = project.assets.filter((asset) => sequence.assetIds.includes(asset.id) && ['Props', 'Weapons', 'Vehicles', 'Mechanical Systems'].includes(asset.category));
   return [
     {
       id: `${sequence.id}:action:1`, order: 1, actorAssetId: primary.id, actorAssetNumber: primary.projectNumber, actorName: primary.name,
       verb: sequence.number === 1 ? 'enters and establishes the objective' : 'continues from the inherited ending position',
-      targetAssetId: props[0]?.id ?? null, targetAssetNumber: props[0]?.projectNumber ?? null, startSecond: 0, endSecond: Number((sequence.duration * 0.28).toFixed(2)),
-      screenPosition: 'Inherited or opening blocking mark', screenDirection: sequence.sceneState.screenDirection, hand: props[0] ? 'Unspecified' : 'Not applicable',
-      objectVisibilityBefore: props[0]?.currentState.visibility ?? 'Not applicable', objectVisibilityAfter: props[0]?.currentState.visibility ?? 'Not applicable',
-      containmentBefore: props[0] ? `At ${props[0].currentState.currentLocation}; holder ${props[0].currentState.holder}` : 'Not applicable',
-      containmentAfter: props[0] ? `Ownership and containment remain recorded unless this action explicitly changes them` : 'Not applicable',
-      resultingState: sequence.purpose, requiredAssetNumbers: [primary.projectNumber, ...(props[0] ? [props[0].projectNumber] : [])],
+      targetAssetId: null, targetAssetNumber: null, startSecond: 0, endSecond: Number((sequence.duration * 0.28).toFixed(2)),
+      screenPosition: 'Inherited or opening blocking mark', screenDirection: sequence.sceneState.screenDirection, hand: 'Not applicable',
+      objectVisibilityBefore: 'Not applicable', objectVisibilityAfter: 'Not applicable',
+      containmentBefore: 'Not applicable', containmentAfter: 'Not applicable',
+      resultingState: sequence.purpose, requiredAssetNumbers: [primary.projectNumber],
     },
     {
       id: `${sequence.id}:action:2`, order: 2, actorAssetId: primary.id, actorAssetNumber: primary.projectNumber, actorName: primary.name,
@@ -430,13 +433,17 @@ export function buildSequenceScenario(project: StudioProject, sequence: StudioSe
     activeStoryObjective: previous?.activeStoryObjective ?? project.story.conflict,
     escalationScore: previous?.escalationScore ?? Math.min(100, Math.round((sequence.number / project.sequenceCount) * 100)),
     location: sequence.location, timeOfDay: sequence.timeOfDay, characterAssetIds: [...sequence.assetManifest.characters],
-    nonSpeakingCharacterAssetIds: previous?.nonSpeakingCharacterAssetIds ?? sequence.assetManifest.characters.filter((id) => !dialogue.some((line) => line.speakerAssetId === id)),
+    nonSpeakingCharacterAssetIds: (previous?.nonSpeakingCharacterAssetIds ?? sequence.assetManifest.characters)
+      .filter((id) => !dialogue.some((line) => line.speakerAssetId === id)),
     characterContinuity: sequence.assetManifest.characters.map((id) => {
       const asset = project.assets.find((item) => item.id === id)!;
       const state = characterStates?.[id];
       return {
         assetId: id, assetNumber: asset.projectNumber,
-        currentAppearance: state?.currentAppearance ?? { costumeAssetNumbers: currentCostumes(project, asset), damage: asset.currentState.damage, transformation: asset.currentState.transformation, accessories: [] },
+        currentAppearance: {
+          ...(state?.currentAppearance ?? { damage: asset.currentState.damage, transformation: asset.currentState.transformation, accessories: [] }),
+          costumeAssetNumbers: currentCostumes(project, asset, sequence),
+        },
         knowledgeBeforeSequence: state?.knowledge.filter((item) => item.sequenceNumber <= sequence.number) ?? [],
         relationships: state?.relationships ?? {}, emotion: state?.currentEmotion ?? 'Story-defined', motivation: state?.currentMotivation ?? project.story.conflict,
         position: state?.currentPosition ?? asset.currentState.currentLocation, screenDirection: state?.screenDirection ?? sequence.sceneState.screenDirection,

@@ -6,6 +6,16 @@ Continuity Studio 2 is a chat-first, project-based, continuity-aware, provider-i
 
 Continuity Studio creates no separate audio asset workflow. Seedance generates requested spoken dialogue, ambience, effects, music, and silence inside each video. The Studio owns the scenario, script, exact dialogue, numbered speaker binding, pronunciation, language and dialect, timing, actions, environment, continuity state, reference order, restrictions, and compiled Seedance request.
 
+## Chat product experience
+
+The filmmaking conversation is the primary interface. A local or desktop Studio opens directly to its branded sidebar, projects, chat, composer, and attachment controls without a second Continuity Studio or OpenAI sign-in gate when the local Codex environment is already authorized. Codex is the supported local orchestration and reasoning brain through its app-server, CLI/SDK, or configured local host bridge; the database-backed structured project engine remains the authority that validates and applies changes. Provider credentials belong in setup or settings, never on the normal Studio home screen.
+
+Story, Script, Scenario, World Bible, Film Bible, Sequence Plan, and Seedance Prompt results appear as clean expandable chat documents. Every one supports direct clean-content Copy, readable text Download, Edit-through-chat, and Regenerate actions. Visual and video results expose View and Download only when real media exists. Natural commands such as `Copy Sequence 4`, `Download the story`, `Create all required assets`, `Show Sequence 6`, and `Copy the Seedance prompt` work without forcing page navigation.
+
+The composer accepts text, multiple attachments in one message, later attachments, drag and drop, pasted images, file selection, previews, removal, and send. It never accepts audio into a standalone production library.
+
+Automatic Production, Master Approval, and Manual Approval are the three approval behaviors. Automatic Production is the simplest default and advances routine non-paid preparation while showing results in chat. Master Approval records one approval for the complete non-paid plan. Manual Approval waits at individual stages. None authorizes paid image or video work by default. `Continue` performs or explains the next non-paid step and stops before an expensive provider call.
+
 ## Project state machine
 
 The only forward lifecycle is:
@@ -33,6 +43,8 @@ One movie has one flat asset folder with no subfolders. Every visual production 
 
 Portable filenames are deterministic: `NNN_NAME_GENERATED.png`. Names are normalized for Windows, macOS, ZIP, Unicode, length, and reserved device names while retaining the permanent numeric prefix. The export identity combines the project ID with the title so projects sharing a title cannot collide.
 
+Uploaded photographs and other source references have internal reference identifiers and do not consume production asset numbers. Multiple photographs of one person contribute to one locked character identity. One Master Character Sheet is one coherent composite image, one file, and one numbered production asset; front, profile, three-quarter, full-body, rear, face-detail, or other views are panels inside that sheet. The same counting rule applies to a composed costume, environment, location, prop, creature, vehicle, mechanical, transformation, or damage sheet when its views belong to the same stable production asset or state. Panels never increase the asset count. Genuinely different states or production elements remain separately discovered numbered assets.
+
 ## Approved decision pins and inference
 
 The user can pin character identity, costume, location, dialogue, camera rules, asset versions, and sequence versions through chat. A pin is an approved structured record. No inference, regeneration, provider result, or story edit may change it until the user explicitly releases it.
@@ -46,6 +58,8 @@ Automatic reference roles remain editable. A user can restrict a reference to on
 Warnings have two levels. A Blocker prevents the affected expensive or impossible operation. A Recommendation remains visible but does not stop normal work.
 
 ## Generation and providers
+
+Creating a story, Bible, manifest, sheet brief, scenario, script, sequence, reference map, continuity package, or Seedance prompt never starts video. Video preparation begins only after an explicit command equivalent to `Generate Sequence 1`, `Create this video`, or `Send this to Seedance`; paid submission still receives the visible provider/model/duration/resolution/cost confirmation unless the user explicitly configured automatic paid generation. A Regenerate document or sequence command can never be parsed as Generate video.
 
 Every generation request is rebuilt from current approved structured data. Historical prompt text is never submitted blindly. Entering generation creates an immutable per-attempt freeze containing scenario, exact dialogue, upload order, compiled prompt, continuity, provider, exact model version, capability revision, settings, data version, and structured-state hash.
 
@@ -82,3 +96,4 @@ Every release must cover:
 - prompt regression for dialogue speakers, numbered references, continuity, scene details, role overrides, and restrictions;
 - end-to-end idea, approval, assets, bindings, planning, dialogue, generation freeze, regeneration, restart, export, restore, and final assembly;
 - enforcement of the no-audio-asset policy.
+- UI-level blank-project qualification through the actual chat, including multi-reference previews and upload, one-identity mapping, one composite sheet number, document Copy/Download actions, safe `Continue`, natural prompt control, explicit-only video, and close/reopen restoration without direct database seeding or fixture media counted as production success.

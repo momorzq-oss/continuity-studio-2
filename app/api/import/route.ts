@@ -1,6 +1,7 @@
 import { unzipSync } from 'fflate';
 
 import { ensureSchema, getRuntimeEnv } from '@/db/runtime';
+import { encodeProjectState } from '@/lib/project-state-codec';
 import { refreshProductionSystem } from '@/lib/production-system';
 import { createProjectFromIdea, normalizeProject, nowIso, type StudioMessage, type StudioProject } from '@/lib/studio';
 
@@ -231,6 +232,7 @@ export async function POST(request: Request) {
     messages.push(assistant);
 
     const transactionId = crypto.randomUUID();
+    const encodedProject = await encodeProjectState(project);
     const statements: D1PreparedStatement[] = [
       DB.prepare(`INSERT INTO projects (
         id, title, duration_seconds, sequence_duration_seconds, sequence_count, genre, story_status, film_bible_status,
@@ -242,7 +244,7 @@ export async function POST(request: Request) {
         project.sequences.every((sequence) => sequence.status === 'Approved') ? 'Approved' : 'In progress', project.continuity.status,
         project.exportStatus, project.pinned ? 1 : 0, 0, project.production.control.dataSchema.currentVersion,
         project.production.control.stateMachine.current, project.production.control.exportIdentity.collisionSafeSlug,
-        JSON.stringify(project), project.createdAt, project.updatedAt,
+        encodedProject, project.createdAt, project.updatedAt,
       ),
       DB.prepare('INSERT INTO project_transactions (project_id, revision, last_transaction_id, updated_at) VALUES (?, ?, ?, ?)').bind(project.id, 1, transactionId, project.updatedAt),
       DB.prepare('INSERT INTO project_imports (id, project_id, import_kind, source_name, fingerprint_sha256, manifest_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
@@ -323,8 +325,9 @@ export async function POST(request: Request) {
         if (!recovery.state) continue;
         let state = JSON.stringify(recovery.state).replaceAll(originalId, project.id);
         for (const [oldId, newId] of persistentIdMap) state = state.replaceAll(oldId, newId);
+        const encodedRecovery = await encodeProjectState(JSON.parse(state));
         statements.push(DB.prepare('INSERT INTO project_recovery_snapshots (id, project_id, reason, state_json, created_at) VALUES (?, ?, ?, ?, ?)')
-          .bind(`recovery_${crypto.randomUUID()}`, project.id, recovery.reason ?? `Restored from ${name}`, state, recovery.createdAt ?? project.updatedAt));
+          .bind(`recovery_${crypto.randomUUID()}`, project.id, recovery.reason ?? `Restored from ${name}`, encodedRecovery, recovery.createdAt ?? project.updatedAt));
       } catch { /* A malformed optional recovery entry never invalidates the primary project restore. */ }
     }
     for (const attachment of project.attachments) {
@@ -343,7 +346,7 @@ export async function POST(request: Request) {
           .bind(`checksum_${crypto.randomUUID()}`, project.id, mediaKey, 'original-reference', digest, source[1].byteLength, 'Verified', project.updatedAt),
       );
     }
-    await DB.batch(statements);
+    for (let start = 0; start < statements.length; start += 16) await DB.batch(statements.slice(start, start + 16));
     return Response.json({ project, messages, imported: true, kind });
   } catch (error) {
     console.error(error);
