@@ -1,7 +1,17 @@
 {
-  "name": "sites-project",
-  "version": "0.1.0",
+  "name": "continuity-studio-2",
+  "version": "1.0.0",
+  "description": "A chat-first, continuity-aware filmmaking production system with a local Codex reasoning bridge.",
   "private": true,
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/momorzq-oss/continuity-studio-2.git"
+  },
+  "homepage": "https://continuity-studio-2.momorabeeh.chatgpt.site",
+  "bugs": {
+    "url": "https://github.com/momorzq-oss/continuity-studio-2/issues"
+  },
   "engines": {
     "node": ">=22.13.0"
   },
@@ -12,6 +22,7 @@
     "build": "vinext build",
     "start": "wrangler dev --config dist/server/wrangler.json",
     "lint": "oxlint",
+    "typecheck": "tsc --noEmit",
     "test": "node --test tests/acceptance.test.mjs tests/provider.test.mjs",
     "test:ui": "playwright test",
     "test:all": "npm test && npm run test:ui",
