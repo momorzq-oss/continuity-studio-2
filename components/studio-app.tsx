@@ -62,7 +62,12 @@ type RuntimeCapabilities = {
   codexBrain: 'checking' | 'connected' | 'fallback';
 };
 
+function canReachLocalCodexHost() {
+  return window.location.protocol === 'http:' && ['localhost', '127.0.0.1'].includes(window.location.hostname);
+}
+
 async function askCodexBrain(project: StudioProject | null, message: string): Promise<StudioBrainResult | null> {
+  if (!canReachLocalCodexHost()) return null;
   const controller = new AbortController();
   const timer = window.setTimeout(() => controller.abort(), 245_000);
   try {
@@ -605,7 +610,7 @@ export function StudioApp() {
   const [search, setSearch] = useState('');
   const [assetFilter, setAssetFilter] = useState('All');
   const [lightMode, setLightMode] = useState(false);
-  const [capabilities, setCapabilities] = useState<RuntimeCapabilities>({ imageGeneration: false, codexBrain: 'checking' });
+  const [capabilities, setCapabilities] = useState<RuntimeCapabilities>({ imageGeneration: false, codexBrain: 'fallback' });
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const importInputRef = useRef<HTMLInputElement>(null);
@@ -705,6 +710,7 @@ export function StudioApp() {
   }, [loadProject]);
 
   useEffect(() => {
+    if (!canReachLocalCodexHost()) return;
     const controller = new AbortController();
     const timer = window.setTimeout(() => controller.abort(), 3000);
     void fetch('http://127.0.0.1:4317/healthz', { cache: 'no-store', signal: controller.signal })
