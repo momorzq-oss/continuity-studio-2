@@ -27,6 +27,7 @@ import {
   initializeProductionControl,
 } from './production-control';
 import type { ProductionControlSystem } from './production-control';
+import { initializeLocalProduction } from './local-production';
 
 export type { DialogueLine } from './scenario-engine';
 
@@ -310,7 +311,7 @@ export interface FinalQualityReport {
 }
 
 export interface ProductionSystem {
-  schemaVersion: 4;
+  schemaVersion: 5;
   pipelineStages: string[];
   currentPipelineStage: string;
   readiness: ProductionReadiness;
@@ -326,8 +327,13 @@ export interface ProductionSystem {
   completionAudit: MovieCompletionAudit;
   audioPolicy: {
     separateAudioAssetsAllowed: false;
-    generationOwner: 'Seedance video generation';
-    studioResponsibility: 'Scenario, exact dialogue, speaker binding, timing, sound instructions, and continuity only';
+    generationOwner: string;
+    studioResponsibility: string;
+    providerCapabilities: Record<string, {
+      generatedAudiovisual: 'Supported' | 'Unsupported' | 'Unknown';
+      referenceAudio: 'Supported' | 'Unsupported' | 'Unknown';
+      capabilitySource: string;
+    }>;
   };
   assetLineage: Record<string, AssetLineage>;
   renderQueue: RenderQueueItem[];
@@ -446,7 +452,16 @@ function expectedCounts(project: StudioProject, sequence: StudioSequence) {
 }
 
 function modelProfiles(project: StudioProject, previous?: ModelCapabilityProfile[]) {
-  if (previous?.length) return previous.map((profile) => ({
+  const h3Profile: ModelCapabilityProfile = {
+    id: 'local-minimax-h3-runtime', provider: 'Local ComfyUI', model: 'MiniMax H3 (mode selected per sequence)', modelVersion: 'manifest-pinned', connectionStatus: 'Not connected',
+    maximumDurationSeconds: null, supportedDurations: [], supportedResolutions: [], referenceImageSupport: 'Supported', maximumReferenceImages: null,
+    generatedSoundInVideo: 'Supported', promptCharacterLimit: null, imageToVideo: 'Supported',
+    supportedReferenceTypes: ['image', 'first-frame', 'last-frame', 'previous-video', 'previous-ending-frame', 'scheduled-reference', 'audio-context'],
+    supportedFileExtensions: ['png', 'jpg', 'jpeg', 'webp', 'mp4', 'mov', 'wav', 'flac'], capabilityRevision: 'runtime-preflight-required-1', refreshedAt: project.updatedAt,
+    limitationPolicy: 'The local runtime must validate the installed H3 mode, exact checkpoint, ComfyUI object schemas, VRAM preset, reference count, duration, resolution, audiovisual support, and pinned workflow checksum before execution.',
+  };
+  if (previous?.length) {
+    const hydrated = previous.map((profile) => ({
     ...profile,
     modelVersion: profile.modelVersion ?? profile.model,
     generatedSoundInVideo: profile.generatedSoundInVideo ?? 'Unknown',
@@ -454,7 +469,10 @@ function modelProfiles(project: StudioProject, previous?: ModelCapabilityProfile
     supportedFileExtensions: profile.supportedFileExtensions ?? ['png', 'jpg', 'jpeg', 'webp', 'mp4', 'mov'],
     capabilityRevision: profile.capabilityRevision ?? 'unverified-1',
     refreshedAt: profile.refreshedAt ?? project.updatedAt,
-  }));
+    }));
+    if (!hydrated.some((profile) => profile.id === h3Profile.id)) hydrated.push(h3Profile);
+    return hydrated;
+  }
   return [
     {
       id: 'video-adapter-unconfigured', provider: project.settings.videoProvider, model: 'Provider model not selected', modelVersion: 'unconfigured', connectionStatus: 'Not connected' as const,
@@ -472,6 +490,7 @@ function modelProfiles(project: StudioProject, previous?: ModelCapabilityProfile
       capabilityRevision: 'unverified-1', refreshedAt: project.updatedAt,
       limitationPolicy: 'The asset generation adapter must publish its reference, resolution, prompt, cost, and output limits before automatic execution.',
     },
+    h3Profile,
   ];
 }
 
@@ -715,20 +734,28 @@ export function initializeProductionSystem(project: StudioProject): ProductionSy
   const finalAssembly: FinalAssemblyPlan = previous?.finalAssembly ?? {
     id: uid('assembly'), version: 1, status: 'Blocked', orderedSequenceNumbers: project.sequences.map((sequence) => sequence.number),
     transitionPlan: project.sequences.slice(1).map((sequence) => `Match the approved last frame and authored sound-continuity instruction into Sequence ${sequence.number}.`),
-    soundContinuityPlan: ['Seedance generates spoken dialogue, ambience, effects, requested music, and silence inside each video.', 'Match authored sound sources and intentional silence at every approved sequence boundary; do not create or export separate sound assets.'],
+    soundContinuityPlan: ['The selected provider generates spoken dialogue, ambience, effects, requested music, and silence inside each audiovisual result only when its verified capability profile supports them.', 'Match authored sound sources and intentional silence at every approved sequence boundary; do not create or export a separate audio asset workflow.'],
     colorPlan: ['Match exposure, white balance, palette, and time-of-day across every approved boundary.'],
     stabilizationPlan: ['Apply stabilization only where it does not alter approved framing, scale, or motion intention.'], creditsPlan: 'Append approved project credits after the final story frame.',
     missingSequenceNumbers: project.sequences.filter((sequence) => sequence.status !== 'Approved').map((sequence) => sequence.number), createdAt: project.updatedAt,
   };
-  finalAssembly.soundContinuityPlan ??= ['Seedance generates requested sound inside each video; Continuity Studio exports instructions and continuity state only.'];
+  finalAssembly.soundContinuityPlan ??= ['A verified provider may generate requested sound inside each audiovisual result; Continuity Studio stores instructions, speaker bindings, timing, and continuity, with no separate audio asset workflow.'];
   finalAssembly.missingSequenceNumbers = project.sequences.filter((sequence) => sequence.status !== 'Approved').map((sequence) => sequence.number);
   finalAssembly.status = finalAssembly.missingSequenceNumbers.length ? 'Blocked' : finalAssembly.status === 'Approved' ? 'Approved' : 'Ready';
   const system = {
-    schemaVersion: 4, pipelineStages: [...PIPELINE_STAGES], currentPipelineStage: 'STORY', readiness: 'Story Ready', nextLogicalAction: '',
+    schemaVersion: 5, pipelineStages: [...PIPELINE_STAGES], currentPipelineStage: 'STORY', readiness: 'Story Ready', nextLogicalAction: '',
     storyLock: previous?.storyLock ?? { status: 'Unlocked', lockedAt: null, reason: 'Story remains editable until production begins.' },
     dependencies: dependencyGraph(project, previous), sequencePlans, characterStates, storyThreads, repetitionFindings, correctionMemory,
     generationSnapshots: previous?.generationSnapshots ?? [], completionAudit: buildMovieCompletionAudit(project, scenarios, repetitionFindings, storyThreads),
-    audioPolicy: { separateAudioAssetsAllowed: false, generationOwner: 'Seedance video generation', studioResponsibility: 'Scenario, exact dialogue, speaker binding, timing, sound instructions, and continuity only' },
+    audioPolicy: {
+      separateAudioAssetsAllowed: false,
+      generationOwner: 'Verified audiovisual provider selected for each sequence',
+      studioResponsibility: 'Scenario, exact dialogue, speaker binding, pronunciation, timing, ambient sound, effects, music policy, reference instructions, and audio continuity; no separate audio asset workflow',
+      providerCapabilities: {
+        Seedance: { generatedAudiovisual: 'Supported', referenceAudio: 'Unknown', capabilitySource: 'Connected Seedance adapter profile must confirm exact model behavior before execution.' },
+        'MiniMax H3': { generatedAudiovisual: 'Supported', referenceAudio: 'Unknown', capabilitySource: 'Installed H3 mode, model checkpoint, and live ComfyUI graph must pass runtime capability preflight.' },
+      },
+    },
     assetLineage,
     renderQueue, validations: previous?.validations ?? [], corrections: previous?.corrections ?? [], checkpoints: previous?.checkpoints ?? [],
     modelCapabilities: capabilities, selectedCapabilityProfileId, costLedger, finalAssembly,
@@ -748,6 +775,7 @@ export function initializeProductionSystem(project: StudioProject): ProductionSy
 
 export function refreshProductionSystem(project: StudioProject) {
   project.production = initializeProductionSystem(project);
+  if (project.localProduction) project.localProduction = initializeLocalProduction(project, project.localProduction);
   return project;
 }
 

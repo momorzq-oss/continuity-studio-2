@@ -271,7 +271,98 @@ function intelligenceStatements(project: StudioProject) {
     productionRecord('movie-completion-audit', project.production.completionAudit.id, project.production.completionAudit.status, null, project.production.completionAudit),
     productionRecord('audio-policy', 'single-policy', 'Enforced', null, project.production.audioPolicy),
     productionRecord('autosave', 'current', 'Enabled', null, project.production.autosave),
+    productionRecord('local-production-state', 'current', 'Recorded', null, project.localProduction),
   );
+  const workflow = project.localProduction.workflowPin;
+  statements.push(DB.prepare(`INSERT INTO workflow_pins
+    (id, project_id, workflow_id, workflow_version, checksum_sha256, source, compatibility_status, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(project_id, workflow_id) DO UPDATE SET workflow_version = excluded.workflow_version,
+      checksum_sha256 = excluded.checksum_sha256, source = excluded.source,
+      compatibility_status = excluded.compatibility_status, updated_at = excluded.updated_at`)
+    .bind(`${project.id}:${workflow.id}`, project.id, workflow.id, workflow.version, workflow.checksumSha256, workflow.source, workflow.compatibilityStatus, project.updatedAt));
+  for (const board of project.localProduction.storyboards) {
+    statements.push(productionRecord('storyboard-board', board.id, board.approvalState, null, board));
+    for (const panel of board.panels) {
+      statements.push(DB.prepare(`INSERT INTO storyboard_panels
+        (id, project_id, board_id, panel_label, sequence_id, sequence_number, version, approval_state, generated_media_key, content_json, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(project_id, board_id, panel_label) DO UPDATE SET sequence_id = excluded.sequence_id,
+          sequence_number = excluded.sequence_number, version = excluded.version, approval_state = excluded.approval_state,
+          generated_media_key = excluded.generated_media_key, content_json = excluded.content_json, updated_at = excluded.updated_at`)
+        .bind(`${project.id}:${panel.id}`, project.id, board.id, panel.label, panel.sequenceId, panel.sequenceNumber, panel.version, panel.approvalState, panel.generatedFile, JSON.stringify(panel), panel.updatedAt));
+    }
+  }
+  for (const reference of project.localProduction.references) {
+    statements.push(
+      DB.prepare(`INSERT INTO stable_references
+        (id, project_id, stable_tag, reference_kind, reference_role, asset_stable_id, asset_number, source_identifier, approved_version, enabled, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(project_id, stable_tag) DO UPDATE SET reference_kind = excluded.reference_kind,
+          reference_role = excluded.reference_role, asset_stable_id = excluded.asset_stable_id, asset_number = excluded.asset_number,
+          source_identifier = excluded.source_identifier, approved_version = excluded.approved_version, enabled = excluded.enabled, updated_at = excluded.updated_at`)
+        .bind(`${project.id}:${reference.id}`, project.id, reference.stableTag, reference.kind, reference.role, reference.assetId, reference.assetNumber, reference.sourceIdentifier, reference.approvedVersion, reference.enabled ? 1 : 0, project.updatedAt),
+      DB.prepare(`INSERT INTO reference_schedules
+        (id, project_id, reference_id, active_sequence_numbers_json, schedule_source, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(project_id, reference_id) DO UPDATE SET active_sequence_numbers_json = excluded.active_sequence_numbers_json,
+          schedule_source = excluded.schedule_source, updated_at = excluded.updated_at`)
+        .bind(`${project.id}:${reference.id}:schedule`, project.id, `${project.id}:${reference.id}`, JSON.stringify(reference.activeSequenceNumbers), reference.scheduleSource, project.updatedAt),
+    );
+  }
+  for (const workspace of Object.values(project.localProduction.sequenceWorkspaces)) {
+    statements.push(productionRecord('cinematic-sequence-intention', workspace.sequenceId, workspace.staleReasons.length ? 'Stale' : 'Current', workspace.sequenceNumber, workspace.canonicalIntention));
+    for (const translation of workspace.translations) {
+      statements.push(DB.prepare(`INSERT INTO provider_translations
+        (id, project_id, sequence_id, sequence_number, provider, mode, source_intention_hash, compiled_prompt, reference_mapping_json, warnings_json, compiled_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(project_id, sequence_id, provider) DO UPDATE SET mode = excluded.mode,
+          source_intention_hash = excluded.source_intention_hash, compiled_prompt = excluded.compiled_prompt,
+          reference_mapping_json = excluded.reference_mapping_json, warnings_json = excluded.warnings_json, compiled_at = excluded.compiled_at`)
+        .bind(`${project.id}:${translation.id}`, project.id, translation.sequenceId, workspace.sequenceNumber, translation.provider, translation.mode,
+          translation.sourceIntentionHash, translation.compiledPrompt, JSON.stringify(translation.referenceMapping), JSON.stringify(translation.warnings), translation.compiledAt));
+    }
+  }
+  for (const candidate of project.localProduction.candidates) {
+    statements.push(DB.prepare(`INSERT INTO sequence_candidates
+      (id, project_id, sequence_id, sequence_number, generation_snapshot_id, status, media_key, poster_key, seed, correction_scope, validation_report_id, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET status = excluded.status, media_key = excluded.media_key,
+        poster_key = excluded.poster_key, correction_scope = excluded.correction_scope, validation_report_id = excluded.validation_report_id`)
+      .bind(candidate.id, project.id, candidate.sequenceId, candidate.sequenceNumber, candidate.generationSnapshotId, candidate.status,
+        candidate.mediaPath, candidate.posterPath, candidate.seed, candidate.correctionScope, candidate.validationReportId, candidate.createdAt));
+  }
+  for (const job of project.localProduction.queue) {
+    statements.push(
+      DB.prepare(`INSERT INTO local_runtime_jobs
+        (id, project_id, sequence_id, sequence_number, candidate_id, status, progress, provider, model_id, workflow_id,
+          workflow_version, workflow_checksum, immutable_snapshot_json, result_json, failure_message, retry_count, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET status = excluded.status, progress = excluded.progress,
+          result_json = excluded.result_json, failure_message = excluded.failure_message, retry_count = excluded.retry_count, updated_at = excluded.updated_at`)
+        .bind(job.id, project.id, job.sequenceId, job.sequenceNumber, job.candidateId, job.status, job.progress, job.provider,
+          job.modelId, job.workflowId, job.workflowVersion, job.workflowChecksum, JSON.stringify(job.immutableSnapshot),
+          JSON.stringify({ outputPath: job.outputPath, checkpointId: job.checkpointId, elapsedSeconds: job.elapsedSeconds, runtimeProvenance: job.runtimeProvenance }), job.failure, job.retryCount, job.createdAt, job.updatedAt),
+      DB.prepare(`INSERT INTO generation_provenance
+        (id, project_id, sequence_id, candidate_id, workflow_checksum, model_version, backend_versions_json, provenance_json, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(project_id, candidate_id) DO UPDATE SET provenance_json = excluded.provenance_json`)
+        .bind(`${job.candidateId}:provenance`, project.id, job.sequenceId, job.candidateId, job.workflowChecksum, job.modelId,
+          JSON.stringify(job.runtimeProvenance?.backendVersions ?? { workflowVersion: job.workflowVersion, runtime: 'local-runtime-manager-1.0.0' }), JSON.stringify({ ...job.immutableSnapshot, runtimeProvenance: job.runtimeProvenance }), job.createdAt),
+    );
+  }
+  for (const handoff of project.localProduction.handoffs) {
+    statements.push(DB.prepare(`INSERT INTO continuity_handoffs
+      (id, project_id, sequence_id, sequence_number, candidate_id, approved_video_key, ending_frames_json,
+        continuation_frames_json, ending_latent_key, audio_context_key, handoff_json, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(project_id, sequence_number, candidate_id) DO UPDATE SET approved_video_key = excluded.approved_video_key,
+        ending_frames_json = excluded.ending_frames_json, continuation_frames_json = excluded.continuation_frames_json,
+        ending_latent_key = excluded.ending_latent_key, audio_context_key = excluded.audio_context_key, handoff_json = excluded.handoff_json`)
+      .bind(handoff.id, project.id, handoff.sequenceId, handoff.sequenceNumber, handoff.candidateId, handoff.approvedVideoPath,
+        JSON.stringify(handoff.endingFramePaths), JSON.stringify(handoff.continuationFramePaths), handoff.endingLatentPath,
+        handoff.audioContextPath, JSON.stringify(handoff), handoff.createdAt));
+  }
   return statements;
 }
 
@@ -551,11 +642,28 @@ export async function POST(request: Request) {
     const body = (await request.json()) as {
       projectId?: string;
       message?: string;
-      action?: 'pin' | 'archive' | 'settings';
+      action?: 'pin' | 'archive' | 'settings' | 'runtime-sync';
       settings?: Partial<StudioProject['settings']>;
       expectedRevision?: number;
       attachmentId?: string;
       brainResult?: unknown;
+      runtimeJob?: {
+        id: string;
+        studioJobId?: string | null;
+        candidateId?: string | null;
+        projectId: string;
+        sequenceId: string;
+        target: 'storyboard' | 'h3-chain';
+        sequenceNumber: number;
+        status: string;
+        progress: number;
+        output?: Array<{ filename?: string; subfolder?: string; type?: string }>;
+        failure?: string | null;
+        elapsedSeconds?: number;
+        retryCount?: number;
+        checkpoint?: unknown;
+        provenance?: Record<string, unknown>;
+      };
     };
     const brainResult = parseStudioBrainResult(body.brainResult);
     const imageGenerationAvailable = Boolean(getRuntimeEnv().OPENAI_API_KEY);
@@ -577,11 +685,58 @@ export async function POST(request: Request) {
       return json({ error: `This project changed in another session. Reloaded revision is ${project.storageRevision}; your request expected revision ${expectedRevision}. No changes were applied.`, conflict: true, project }, { status: 409 });
     }
 
-    if (body.action === 'pin' || body.action === 'archive' || body.action === 'settings') {
+    if (body.action === 'pin' || body.action === 'archive' || body.action === 'settings' || body.action === 'runtime-sync') {
       const beforeProject = structuredClone(project);
       if (body.action === 'pin') project.pinned = !project.pinned;
       if (body.action === 'archive') project.archived = true;
       if (body.action === 'settings' && body.settings) project.settings = { ...project.settings, ...body.settings };
+      if (body.action === 'runtime-sync') {
+        const hostname = new URL(request.url).hostname;
+        if (!['localhost', '127.0.0.1'].includes(hostname)) return json({ error: 'Local runtime results may only be synchronized through the localhost Studio.' }, { status: 403 });
+        const runtimeJob = body.runtimeJob;
+        const terminal = new Set(['Needs Review', 'Approved', 'Failed', 'Paused', 'Cancelled', 'Rejected']);
+        if (!runtimeJob || runtimeJob.projectId !== project.id || !/^[a-zA-Z0-9_-]{1,180}$/.test(runtimeJob.id) || !terminal.has(runtimeJob.status)) {
+          return json({ error: 'The local runtime result is not a valid terminal job for this project.' }, { status: 400 });
+        }
+        const outputs = Array.isArray(runtimeJob.output) ? runtimeJob.output : [];
+        const mediaIndex = Math.max(0, outputs.findIndex((output) => /\.(?:mp4|webm|mov|mkv)$/i.test(output.filename || '')));
+        const outputPath = outputs.length ? `http://127.0.0.1:4318/v1/jobs/${encodeURIComponent(runtimeJob.id)}/output/${mediaIndex}` : null;
+        if (runtimeJob.target === 'storyboard') {
+          const board = project.localProduction.storyboards.find((item) => item.id === runtimeJob.sequenceId) ?? project.localProduction.storyboards[0];
+          if (board) {
+            board.generatedCompositeFile = outputPath;
+            board.approvalState = outputPath ? 'Needs Review' : board.approvalState;
+            board.updatedAt = nowIso();
+            for (const panel of board.panels) {
+              if (outputPath) {
+                panel.generatedFile = `${outputPath}#panel=${panel.label}`;
+                panel.approvalState = 'Generated';
+                panel.updatedAt = board.updatedAt;
+              }
+            }
+          }
+        } else {
+          const localJob = project.localProduction.queue.find((item) => item.id === runtimeJob.studioJobId)
+            ?? project.localProduction.queue.findLast((item) => item.sequenceId === runtimeJob.sequenceId && item.candidateId === runtimeJob.candidateId);
+          if (!localJob) return json({ error: 'The runtime result does not match an immutable Studio queue job.' }, { status: 409 });
+          const queueStatus = runtimeJob.status === 'Rejected' ? 'Cancelled' : runtimeJob.status as StudioProject['localProduction']['queue'][number]['status'];
+          localJob.status = queueStatus;
+          localJob.progress = Math.max(0, Math.min(100, Number(runtimeJob.progress || 0)));
+          localJob.outputPath = outputPath;
+          localJob.failure = runtimeJob.failure ?? null;
+          localJob.elapsedSeconds = Math.max(0, Number(runtimeJob.elapsedSeconds || 0));
+          localJob.retryCount = Math.max(localJob.retryCount, Number(runtimeJob.retryCount || 0));
+          localJob.runtimeProvenance = runtimeJob.provenance ?? localJob.runtimeProvenance;
+          localJob.updatedAt = nowIso();
+          const candidate = project.localProduction.candidates.find((item) => item.id === localJob.candidateId);
+          if (candidate) {
+            candidate.mediaPath = outputPath;
+            if (runtimeJob.status === 'Approved') candidate.status = 'Approved';
+            else if (runtimeJob.status === 'Rejected') candidate.status = 'Rejected';
+            else if (runtimeJob.status === 'Needs Review' && outputPath) candidate.status = 'Needs Review';
+          }
+        }
+      }
       project.updatedAt = nowIso();
       await persistProject(project, [], expectedRevision, body.action, `${body.action} project setting`, beforeProject);
       return json({ project, projects: await listProjects() });

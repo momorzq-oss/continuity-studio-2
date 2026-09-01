@@ -7,7 +7,8 @@ export type ProductionDocumentKind =
   | 'world-bible'
   | 'film-bible'
   | 'sequence'
-  | 'seedance-prompt';
+  | 'seedance-prompt'
+  | 'h3-prompt';
 
 export interface ProductionDocument {
   kind: ProductionDocumentKind;
@@ -75,7 +76,7 @@ function filmBibleDocument(project: StudioProject): ProductionDocument {
     list('World rules', bible.worldRules),
     list('Character rules', bible.characterRules),
     list('Visual rules', bible.visualRules),
-    list('Seedance sound instructions', bible.soundRules),
+    list('Audiovisual provider sound instructions', bible.soundRules),
     list('Continuity rules', bible.continuityRules),
     list('Negative rules', bible.negativeRules),
   ].filter(Boolean).join('\n\n');
@@ -120,6 +121,19 @@ function seedancePromptDocument(project: StudioProject, sequence: StudioSequence
   return { kind: 'seedance-prompt', title: `${sequence.id} Seedance Prompt`, filename: `${sequence.id}_SEEDANCE_PROMPT_V${plan.revision}.txt`, content: plan.compiledPrompt || sequence.prompt, version: plan.revision, status: plan.freshness };
 }
 
+function h3PromptDocument(project: StudioProject, sequence: StudioSequence): ProductionDocument {
+  const workspace = project.localProduction.sequenceWorkspaces[sequence.id];
+  const translation = workspace.translations.find((item) => item.provider === 'MiniMax H3');
+  return {
+    kind: 'h3-prompt',
+    title: `${sequence.id} MiniMax H3 ${workspace.h3Mode} Prompt`,
+    filename: `${sequence.id}_MINIMAX_H3_${workspace.h3Mode}_PROMPT_V${sequence.version}.txt`,
+    content: translation?.compiledPrompt ?? '',
+    version: sequence.version,
+    status: workspace.staleReasons.length ? 'Needs Review' : 'Current',
+  };
+}
+
 export function getProductionDocument(project: StudioProject, kind: ProductionDocumentKind, sequenceNumber?: number): ProductionDocument | null {
   if (kind === 'story') return storyDocument(project);
   if (kind === 'world-bible') return worldBibleDocument(project);
@@ -129,5 +143,6 @@ export function getProductionDocument(project: StudioProject, kind: ProductionDo
   if (kind === 'scenario') return scenarioDocument(project, sequence);
   if (kind === 'script') return scriptDocument(project, sequence);
   if (kind === 'sequence') return sequenceDocument(project, sequence);
+  if (kind === 'h3-prompt') return h3PromptDocument(project, sequence);
   return seedancePromptDocument(project, sequence);
 }

@@ -23,7 +23,16 @@ Schema-constrained blueprint or canonical command
 Deterministic production engine and validation
         │
         ├── D1: canonical project state, revisions, jobs, recovery, provenance
-        └── R2: original references, generated media, finished clips, archives
+        ├── R2: original references, generated media, finished clips, archives
+        └── Local runtime manager at 127.0.0.1:4318
+                  │
+                  ├── registries: components, models, workflows
+                  ├── semantic workflow adapter + live preflight
+                  └── ComfyUI at 127.0.0.1:8188
+                            ├── Krea 2 / Multi Shot storyboards
+                            ├── MiniMax H3 / scheduled Ref2VA
+                            ├── H3 Contex Loop / transactional review
+                            └── FFmpeg assembly
 ```
 
 The Codex bridge is loopback-only. It accepts the local Studio origin, requests read-only Codex turns, and returns structured reasoning. It cannot directly write project state.
@@ -62,11 +71,27 @@ The image route accepts only explicit generation actions. It reads the asset's p
 
 The OpenAI API key is server-side only. It is not serialized into project state or exports.
 
-## Video provider boundary
+## Canonical sequence and provider boundary
 
-Continuity Studio prepares provider-neutral sequence packages. Seedance or another generator receives exact dialogue, timing, actions, environment behavior, and numbered references. Video generation never begins because story or planning advanced.
+Every sequence has one canonical cinematic intention built from structured scenario, Film and World Bibles, approved asset versions, storyboard panels, dialogue, correction memory, opening/ending state, and dependencies. Provider compilers translate that same intention into official MiniMax H3 or Seedance syntax. A provider prompt is not the source of truth.
+
+Stable Studio tags are scheduled by sequence and resolved into provider-native reference numbers only inside an immutable generation snapshot. The mapping, prompt, model, workflow checksum, versions, seed, steps, resolution, duration, and references are retained as provenance.
+
+Video generation never begins merely because story or planning advanced.
 
 Finished clips may be returned by an integration or imported manually. The Studio validates and versions the result, records its ending state, and carries continuity into the next sequence.
+
+## Local runtime trust boundary
+
+The runtime manager is a separate loopback-only Node process. The browser cannot provide an arbitrary repository, model path, node ID, shell command, or remote URL. Component actions operate only on allowlisted registry entries and pinned commits. ComfyUI start/stop controls affect only the process the runtime started itself.
+
+Visual reference staging is capability-scoped. A request may name only the local Studio file route for the same project or a completed output from a known runtime job in that project. Studio verifies stored file integrity before response; the runtime then enforces image type and size and uploads a generated safe filename to ComfyUI. Workflow sample filenames are never accepted as production references. Completed outputs are exposed through a read-only loopback job-output route and synchronized back into D1-backed project state.
+
+The supplied UI workflow remains outside the MIT source until its redistribution license is confirmed. Studio stores its checksum and semantic bindings, converts only the required execution ancestry into ComfyUI API format, validates live node schemas, and blocks known mode/model contradictions before queue submission.
+
+## Transactional long-form production
+
+The local queue preserves immutable inputs before execution. Generated scenes stop at a Review Gate. Approval creates a structured handoff containing the video, ending and context frames, supported latent/audio context, character positions and directions, wardrobe, objects, vehicle/prop/environment states, lighting, weather, screen direction, sound state, elapsed time, and next opening expectation. Resume verifies prior checkpoint history; it never relies on the last frame alone.
 
 ## Export boundary
 

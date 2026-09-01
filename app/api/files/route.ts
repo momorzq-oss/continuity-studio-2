@@ -48,7 +48,7 @@ export async function POST(request: Request) {
       return Response.json({ error: 'Choose a file and an active project first.' }, { status: 400 });
     }
     if (file.type.startsWith('audio/')) {
-      return Response.json({ error: 'Continuity Studio does not store separate sound assets. Write dialogue, ambience, effects, music, or silence as scenario instructions; Seedance generates them inside the video.' }, { status: 415 });
+      return Response.json({ error: 'Continuity Studio does not store separate sound assets. Write dialogue, ambience, effects, music, or silence as scenario instructions; a verified MiniMax H3 or Seedance mode generates them inside the audiovisual result.' }, { status: 415 });
     }
     if (file.size > 95 * 1024 * 1024) {
       return Response.json({ error: 'That file is over the 95 MB reference limit.' }, { status: 413 });

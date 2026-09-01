@@ -146,8 +146,8 @@ test('production controls, concurrency, dialogue, provenance, rollback, files, i
   assert.equal(created.response.status, 200);
   let project = created.data.project;
   assert.equal(project.storageRevision, 1);
-  assert.equal(project.production.schemaVersion, 4);
-  assert.equal(project.production.control.dataSchema.currentVersion, 4);
+  assert.equal(project.production.schemaVersion, 5);
+  assert.equal(project.production.control.dataSchema.currentVersion, 5);
   assert.equal(project.production.control.stateMachine.current, 'Story Draft');
   assert.equal(project.production.control.authorityPolicy.sourceOfTruth, 'database-structured-state');
   assert.equal(project.production.audioPolicy.separateAudioAssetsAllowed, false);
@@ -349,7 +349,7 @@ test('production controls, concurrency, dialogue, provenance, rollback, files, i
   assert.equal(imported.data.project.production.control.importHistory.at(-1).kind, 'archive');
   assert.deepEqual(imported.data.project.assets.map((asset) => asset.projectNumber), project.assets.map((asset) => asset.projectNumber));
   assert.equal(imported.data.project.production.control.resultProvenance.length, project.production.control.resultProvenance.length);
-  assert.equal(imported.data.project.production.control.dataSchema.currentVersion, 4);
+  assert.equal(imported.data.project.production.control.dataSchema.currentVersion, 5);
 
   const screenplayForm = new FormData();
   const importNonce = Date.now();
@@ -367,7 +367,7 @@ test('production controls, concurrency, dialogue, provenance, rollback, files, i
   legacyForm.append('file', new File([JSON.stringify(legacy)], `legacy-v3-${Date.now()}.json`, { type: 'application/json' }));
   const legacyImport = await jsonRequest('/api/import', { method: 'POST', body: legacyForm });
   assert.equal(legacyImport.response.status, 200, legacyImport.data.error);
-  assert.equal(legacyImport.data.project.production.schemaVersion, 4);
+  assert.equal(legacyImport.data.project.production.schemaVersion, 5);
   assert.ok(legacyImport.data.project.production.control.dataSchema.migratedFromVersions.includes(3));
 
   const flatZip = zipSync({

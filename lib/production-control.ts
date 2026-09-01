@@ -1,8 +1,8 @@
 import type { StudioAsset, StudioProject, StudioSequence } from './studio';
 import type { DialogueLine, ModelCapabilityProfile, SequenceProductionPlan } from './production-system';
 
-export const CURRENT_DATA_SCHEMA_VERSION = 4 as const;
-export const SUPPORTED_DATA_SCHEMA_VERSIONS = [1, 2, 3, 4] as const;
+export const CURRENT_DATA_SCHEMA_VERSION = 5 as const;
+export const SUPPORTED_DATA_SCHEMA_VERSIONS = [1, 2, 3, 4, 5] as const;
 
 export type IntegrityStatus = 'Passed' | 'Needs Review' | 'Failed';
 export type ProjectLifecycleState =

@@ -112,6 +112,16 @@ export async function GET(request: Request) {
       [`${root}/reports/chat_history.json`]: text(messages.results),
       [`${root}/reports/generation_history.json`]: text(jobs.results),
       [`${root}/production/production_system.json`]: text(project.production),
+      [`${root}/local_production/local_production_state.json`]: text(project.localProduction),
+      [`${root}/local_production/workflow_pin.json`]: text(project.localProduction.workflowPin),
+      [`${root}/local_production/stable_references.json`]: text(project.localProduction.references),
+      [`${root}/local_production/reference_schedules.json`]: text(project.localProduction.references.map((reference) => ({ referenceId: reference.id, stableTag: reference.stableTag, activeSequenceNumbers: reference.activeSequenceNumbers, source: reference.scheduleSource }))),
+      [`${root}/local_production/storyboards.json`]: text(project.localProduction.storyboards),
+      [`${root}/local_production/sequence_workspaces.json`]: text(project.localProduction.sequenceWorkspaces),
+      [`${root}/local_production/local_queue.json`]: text(project.localProduction.queue),
+      [`${root}/local_production/candidates.json`]: text(project.localProduction.candidates),
+      [`${root}/local_production/continuity_handoffs.json`]: text(project.localProduction.handoffs),
+      [`${root}/local_production/assembly.json`]: text(project.localProduction.assembly),
       [`${root}/production/production_control.json`]: text(project.production.control),
       [`${root}/production/explicit_sequence_dependencies.json`]: text(project.production.control.sequenceDependencies),
       [`${root}/production/provider_translations.json`]: text(project.production.control.providerTranslations),
@@ -162,11 +172,18 @@ export async function GET(request: Request) {
       files[`${root}/timing/${sequence.id}_TIMING_V${String(productionPlan.revision).padStart(2, '0')}.json`] = text(productionPlan.timing);
       files[`${root}/shots/${sequence.id}_SHOTS_V${String(productionPlan.revision).padStart(2, '0')}.json`] = text(productionPlan.shots);
       files[`${root}/scenarios/${sequence.id}_SCENARIO_V${String(productionPlan.revision).padStart(2, '0')}.json`] = text(productionPlan.scenario);
-      files[`${root}/dialogue/${sequence.id}_DIALOGUE_V${String(productionPlan.revision).padStart(2, '0')}.json`] = text({ generationOwner: 'Seedance video generation', exactSpeakerBindings: productionPlan.dialogue });
+      files[`${root}/dialogue/${sequence.id}_DIALOGUE_V${String(productionPlan.revision).padStart(2, '0')}.json`] = text({ generationOwner: 'Selected verified audiovisual provider', exactSpeakerBindings: productionPlan.dialogue, providerCapabilities: project.production.audioPolicy.providerCapabilities });
       files[`${root}/readiness/${sequence.id}_READINESS_V${String(productionPlan.revision).padStart(2, '0')}.json`] = text(productionPlan.readinessChecklist);
       files[`${root}/reference_packages/${sequence.id}_REFERENCE_PACKAGE_V${String(productionPlan.revision).padStart(2, '0')}.json`] = text(productionPlan.referencePackage);
       files[`${root}/conflict_checks/${sequence.id}_CONFLICTS_V${String(productionPlan.revision).padStart(2, '0')}.json`] = text(productionPlan.conflicts);
       files[`${root}/sequence_versions/${sequence.id}_REVISION_HISTORY.json`] = text(productionPlan.revisions);
+      const workspace = project.localProduction.sequenceWorkspaces[sequence.id];
+      files[`${root}/local_production/intentions/${sequence.id}_CINEMATIC_INTENTION_V${String(sequence.version).padStart(2, '0')}.json`] = text(workspace.canonicalIntention);
+      for (const translation of workspace.translations) {
+        const providerName = safeName(translation.provider).toUpperCase();
+        files[`${root}/local_production/provider_prompts/${sequence.id}_${providerName}_${translation.mode}_V${String(sequence.version).padStart(2, '0')}.txt`] = text(translation.compiledPrompt);
+        files[`${root}/local_production/reference_mappings/${sequence.id}_${providerName}_REFERENCE_MAPPING.json`] = text(translation.referenceMapping);
+      }
       files[`${root}/continuity/CONTINUITY_${sequence.id}.json`] = text({
         continuitySource: sequence.continuitySource,
         openingState: sequence.openingState,

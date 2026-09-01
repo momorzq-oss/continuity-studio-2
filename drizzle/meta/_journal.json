@@ -43,6 +43,13 @@
       "when": 1788020525061,
       "tag": "0005_wide_beyonder",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "6",
+      "when": 1788259422652,
+      "tag": "0006_glossy_the_fury",
+      "breakpoints": true
     }
   ]
 }

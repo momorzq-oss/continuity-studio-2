@@ -18,7 +18,7 @@ const schemaStatements = [
     export_status TEXT NOT NULL DEFAULT 'Not exported',
     pinned INTEGER NOT NULL DEFAULT 0,
     archived INTEGER NOT NULL DEFAULT 0,
-    data_schema_version INTEGER NOT NULL DEFAULT 4,
+    data_schema_version INTEGER NOT NULL DEFAULT 5,
     lifecycle_state TEXT NOT NULL DEFAULT 'Story Draft',
     export_identity TEXT NOT NULL DEFAULT '',
     state_json TEXT NOT NULL,
@@ -465,6 +465,134 @@ const schemaStatements = [
     verified_at TEXT NOT NULL
   )`,
   `CREATE INDEX IF NOT EXISTS idx_archive_verifications_project ON archive_verifications(project_id, verified_at)`,
+  `CREATE TABLE IF NOT EXISTS workflow_pins (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    workflow_id TEXT NOT NULL,
+    workflow_version TEXT NOT NULL,
+    checksum_sha256 TEXT NOT NULL,
+    source TEXT NOT NULL,
+    compatibility_status TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(project_id, workflow_id)
+  )`,
+  `CREATE TABLE IF NOT EXISTS storyboard_panels (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    board_id TEXT NOT NULL,
+    panel_label TEXT NOT NULL,
+    sequence_id TEXT,
+    sequence_number INTEGER,
+    version INTEGER NOT NULL,
+    approval_state TEXT NOT NULL,
+    generated_media_key TEXT,
+    content_json TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(project_id, board_id, panel_label)
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_storyboard_panels_sequence ON storyboard_panels(project_id, sequence_number)`,
+  `CREATE TABLE IF NOT EXISTS stable_references (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    stable_tag TEXT NOT NULL,
+    reference_kind TEXT NOT NULL,
+    reference_role TEXT NOT NULL,
+    asset_stable_id TEXT,
+    asset_number INTEGER,
+    source_identifier TEXT NOT NULL,
+    approved_version INTEGER,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    updated_at TEXT NOT NULL,
+    UNIQUE(project_id, stable_tag)
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_stable_references_project_asset ON stable_references(project_id, asset_stable_id)`,
+  `CREATE TABLE IF NOT EXISTS reference_schedules (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    reference_id TEXT NOT NULL REFERENCES stable_references(id) ON DELETE CASCADE,
+    active_sequence_numbers_json TEXT NOT NULL,
+    schedule_source TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(project_id, reference_id)
+  )`,
+  `CREATE TABLE IF NOT EXISTS provider_translations (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    sequence_id TEXT NOT NULL,
+    sequence_number INTEGER NOT NULL,
+    provider TEXT NOT NULL,
+    mode TEXT NOT NULL,
+    source_intention_hash TEXT NOT NULL,
+    compiled_prompt TEXT NOT NULL,
+    reference_mapping_json TEXT NOT NULL,
+    warnings_json TEXT NOT NULL,
+    compiled_at TEXT NOT NULL,
+    UNIQUE(project_id, sequence_id, provider)
+  )`,
+  `CREATE TABLE IF NOT EXISTS sequence_candidates (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    sequence_id TEXT NOT NULL,
+    sequence_number INTEGER NOT NULL,
+    generation_snapshot_id TEXT NOT NULL,
+    status TEXT NOT NULL,
+    media_key TEXT,
+    poster_key TEXT,
+    seed INTEGER NOT NULL,
+    correction_scope TEXT,
+    validation_report_id TEXT,
+    created_at TEXT NOT NULL
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_sequence_candidates_project_sequence ON sequence_candidates(project_id, sequence_number, status)`,
+  `CREATE TABLE IF NOT EXISTS local_runtime_jobs (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    sequence_id TEXT NOT NULL,
+    sequence_number INTEGER NOT NULL,
+    candidate_id TEXT NOT NULL,
+    status TEXT NOT NULL,
+    progress INTEGER NOT NULL DEFAULT 0,
+    provider TEXT NOT NULL,
+    model_id TEXT NOT NULL,
+    workflow_id TEXT NOT NULL,
+    workflow_version TEXT NOT NULL,
+    workflow_checksum TEXT NOT NULL,
+    immutable_snapshot_json TEXT NOT NULL,
+    result_json TEXT NOT NULL DEFAULT '{}',
+    failure_message TEXT,
+    retry_count INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_local_runtime_jobs_project_status ON local_runtime_jobs(project_id, status)`,
+  `CREATE INDEX IF NOT EXISTS idx_local_runtime_jobs_project_sequence ON local_runtime_jobs(project_id, sequence_number)`,
+  `CREATE TABLE IF NOT EXISTS continuity_handoffs (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    sequence_id TEXT NOT NULL,
+    sequence_number INTEGER NOT NULL,
+    candidate_id TEXT NOT NULL,
+    approved_video_key TEXT,
+    ending_frames_json TEXT NOT NULL,
+    continuation_frames_json TEXT NOT NULL,
+    ending_latent_key TEXT,
+    audio_context_key TEXT,
+    handoff_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE(project_id, sequence_number, candidate_id)
+  )`,
+  `CREATE TABLE IF NOT EXISTS generation_provenance (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    sequence_id TEXT NOT NULL,
+    candidate_id TEXT NOT NULL,
+    workflow_checksum TEXT NOT NULL,
+    model_version TEXT NOT NULL,
+    backend_versions_json TEXT NOT NULL,
+    provenance_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE(project_id, candidate_id)
+  )`,
   `PRAGMA optimize`,
 ] as const;
 
@@ -475,7 +603,7 @@ export async function ensureSchema() {
     const columns = await env.DB.prepare(`PRAGMA table_info(${table})`).all<{ name: string }>();
     if (!columns.results.some((item) => item.name === column)) await env.DB.prepare(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`).run();
   };
-  await ensureColumn('projects', 'data_schema_version', 'INTEGER NOT NULL DEFAULT 4');
+  await ensureColumn('projects', 'data_schema_version', 'INTEGER NOT NULL DEFAULT 5');
   await ensureColumn('projects', 'lifecycle_state', "TEXT NOT NULL DEFAULT 'Story Draft'");
   await ensureColumn('projects', 'export_identity', "TEXT NOT NULL DEFAULT ''");
   await ensureColumn('assets', 'lifecycle_status', "TEXT NOT NULL DEFAULT 'Active'");

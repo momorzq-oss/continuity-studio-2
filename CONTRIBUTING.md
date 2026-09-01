@@ -11,7 +11,7 @@ npm install
 npm run dev
 ```
 
-Use Node.js 22.13 or newer. Run `npm run dev:web` when you do not need the local Codex bridge.
+Use Node.js 22.13 or newer. `npm run dev` starts the web app, Codex bridge, and local runtime manager. Run `npm run dev:web` when you need the web surface only.
 
 ## Before opening a pull request
 
@@ -33,6 +33,11 @@ Describe the user-visible behavior, tests added or changed, database migrations,
 - Composite sheet panels remain inside one asset.
 - Planning does not start paid image or video generation.
 - No separate audio asset system.
+- Provider audiovisual capability is verified per mode; never restore the obsolete assumption that only one provider owns generated audio.
+- Canonical cinematic intentions remain provider-neutral; MiniMax H3 and Seedance translations never replace structured movie state.
+- Stable `@` reference tags and their sequence schedules remain independent of provider-native numbering.
+- Runtime installs remain allowlisted, pinned, external to the MIT core, and license-aware. Never commit model weights.
+- Workflow changes require checksum and live semantic-binding validation; raw numeric node IDs are hints, not authority.
 - Exact dialogue remains bound to its speaker asset and timing.
 - Database state remains canonical; binary media stays in object storage.
 - Codex proposes structured intent; the production engine validates and commits it.

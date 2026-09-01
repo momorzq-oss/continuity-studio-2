@@ -20,7 +20,7 @@
       ],
       "fingerprints": {
         ".superdesign/design-system.md": "a67b27bd43525f0aea27a2beea9a79ee5d251ad7fc71e54af1bb6b625e36573f",
-        "components/studio-app.tsx": "ca80de876b4115248f3cfeedfab163a15975e74f6b99db3fac2294c4328c50f5",
+        "components/studio-app.tsx": "fc85db63fbdd3131b199942ef200cbbe5b0b67fe6ae229568f0824d973d6fcb4",
         "app/globals.css": "a0c01928c030f8d8e2a9b750247365e7a8282665b8b69549a624a47543e43833",
         "components/ui/button.tsx": "081d2a1cb4f3aec636a6894d9eff4e90d476d5db85b82d0399c1f4d18517112e",
         "components/ui/badge.tsx": "5706189b86e8670499fb33f37147dd6f65c39d59eef5211e34157f2952c35e32",
@@ -34,7 +34,35 @@
           "currentVersion": 1
         }
       },
-      "updatedAt": "2026-08-30T13:41:38.9763299+04:00"
+      "updatedAt": "2026-09-01T12:20:00.000Z"
+    },
+    "workspace-engine": {
+      "targetKind": "new-ui",
+      "projectId": "777fba8b-e162-4afb-a9ee-23fc038d8c5d",
+      "activeDraftId": "a5d96b45-600b-4d71-b859-c2fff87e5aa3",
+      "designSystemPath": ".superdesign/design-system.md",
+      "contextFiles": [
+        ".superdesign/design-system.md",
+        "app/globals.css",
+        "components/studio-app.tsx:1:110",
+        "components/studio-app.tsx:1080:1260"
+      ],
+      "fingerprints": {
+        ".superdesign/design-system.md": "a67b27bd43525f0aea27a2beea9a79ee5d251ad7fc71e54af1bb6b625e36573f",
+        "app/globals.css": "a0c01928c030f8d8e2a9b750247365e7a8282665b8b69549a624a47543e43833",
+        "components/studio-app.tsx": "fc85db63fbdd3131b199942ef200cbbe5b0b67fe6ae229568f0824d973d6fcb4"
+      },
+      "sourceTarget": "/",
+      "sourceDraftId": "2fdc0508-6b48-46eb-b3d5-bfc2fa8d3cc8",
+      "drafts": {
+        "a5d96b45-600b-4d71-b859-c2fff87e5aa3": {
+          "title": "Movie Workspace & Local Engine",
+          "visualDirection": "cinematic production workspace with quiet local-runtime diagnostics",
+          "parentDraftId": "2fdc0508-6b48-46eb-b3d5-bfc2fa8d3cc8",
+          "currentVersion": 1
+        }
+      },
+      "updatedAt": "2026-09-01T12:20:00.000Z"
     }
   }
 }

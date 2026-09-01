@@ -74,7 +74,7 @@ function inspectImportEntries(entries: Record<string, Uint8Array>): ImportMappin
 function initialMessage(project: StudioProject, sourceName: string, kind: string): StudioMessage {
   return {
     id: `message_${crypto.randomUUID()}`, role: 'assistant', createdAt: project.updatedAt,
-    content: `Imported “${sourceName}” as a ${kind}. Permanent asset and sequence numbers, versions, approvals, continuity, provider packages, generation states, and chat history were preserved when present. No audio assets were created; dialogue and sound remain Seedance scenario instructions.`,
+    content: `Imported “${sourceName}” as a ${kind}. Permanent asset and sequence numbers, versions, approvals, continuity, provider packages, local production state, generation states, and chat history were preserved when present. No separate audio assets were created; dialogue and sound remain structured audiovisual-provider instructions.`,
     metadata: { kind: 'import' },
   };
 }
@@ -86,7 +86,7 @@ export async function POST(request: Request) {
     const file = form.get('file');
     const confirmMapping = form.get('confirmMapping') === 'true';
     if (!(file instanceof File)) return Response.json({ error: 'Choose a project archive, screenplay, story, sequence plan, or project JSON file.' }, { status: 400 });
-    if (file.type.startsWith('audio/') || isAudioName(file.name)) return Response.json({ error: 'Audio files are not project inputs. Import the script or project archive; Seedance creates requested dialogue and sound inside video.' }, { status: 415 });
+    if (file.type.startsWith('audio/') || isAudioName(file.name)) return Response.json({ error: 'Separate audio files are not project inputs. Import the script or project archive; a verified MiniMax H3 or Seedance mode creates authored dialogue and sound inside video.' }, { status: 415 });
     if (file.size > 95 * 1024 * 1024) return Response.json({ error: 'That import is over the 95 MB project archive limit.' }, { status: 413 });
     const raw = new Uint8Array(await file.arrayBuffer());
     const archiveFingerprint = await fingerprint(raw);

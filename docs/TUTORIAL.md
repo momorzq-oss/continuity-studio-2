@@ -40,6 +40,16 @@ If the status says **Fallback**:
 4. Check that another program is not using port `4317`.
 5. Reload `http://localhost:3000`.
 
+## 2A. Inspect the Local AI Engine
+
+Open **Local AI Engine**. The screen reports ComfyUI, MiniMax H3, H3 Ref2VA, H3 Contex Loop, Krea 2, Krea Multi Shot, FFmpeg, GPU, models, pinned components, workflow compatibility, and exact blocking findings.
+
+Use **Install Missing Components** only when you want Studio to clone the allowlisted pinned repositories into its external runtime folder. Model weights are a separate explicit installation step because of their size and licenses. **Verify Models** checks installed files; **Run Diagnostics** performs the deep workflow/live-node audit.
+
+The supplied workflow currently contains a real mismatch: a loader titled Ref2VA selects an FL2VA checkpoint. Until a genuine Ref2VA model is selected and the live graph validates, Ref2VA rendering must remain blocked.
+
+Krea storyboard readiness and H3 readiness are reported separately. The FL2VA/Ref2VA mismatch does not prevent a valid Krea-only storyboard run, but H3 remains blocked until the real Ref2VA checkpoint is present. When that registered file is verified, Studio injects it through the semantic model binding rather than trusting the misleading serialized widget value.
+
 ## 3. Start with only an idea
 
 Choose **New Movie**. Enter a concise premise, desired length, protagonist, central problem, and any important setting or tone.
@@ -134,7 +144,7 @@ When an approved asset is regenerated:
 
 ## 9. Review sequences, dialogue, and references
 
-Each sequence contains a scenario, script, sequence plan, and Seedance prompt package. Dialogue lines bind exact text and timing to the permanent speaker asset number.
+Each sequence contains one canonical cinematic intention plus MiniMax H3 and Seedance translations. Dialogue lines bind exact text and timing to the permanent speaker asset number.
 
 Verify for every sequence:
 
@@ -150,11 +160,54 @@ Example change:
 Change dialogue in Sequence 2: CHARACTER_001 says "We still have one minute" from 4 to 7 seconds.
 ```
 
-After dialogue changes, regenerate the affected Seedance prompt before generating or importing video.
+After dialogue changes, regenerate the affected provider prompt before generating or importing video.
+
+Open **Movie Workspace** to inspect:
+
+- the sequence rail and selected H3 mode;
+- storyboard panels and scoped panel lineage;
+- active stable-reference tray;
+- official H3 structured prompt;
+- prepared local queue and candidates;
+- previous structured continuity handoff.
+
+Expand **Advanced generation controls** to inspect or change mode, resolution, seed, steps, sampler, scheduler, LoRA override, 22-frame video/audio context preset, continuation mode, candidate count, and workflow pin. Exact values can also be set naturally in chat, for example:
+
+```text
+Set resolution to 1920x1080 for Sequence 4.
+Set seed to 194702 and steps to 18 for Sequence 4.
+Set context length to 22 and audio context to 22 for Sequence 4.
+Use LoRA minimax_h3_turbo strength 0.8 for Sequence 4.
+```
+
+Useful local production commands include:
+
+```text
+Generate the master storyboard.
+Approve all storyboard panels.
+Make A3 a low-angle close-up.
+Regenerate only A3.
+Use H3 Ref2VA for Sequence 4.
+Render Sequences 1 through 4.
+Pause rendering.
+Resume from Sequence 3.
+Generate another candidate.
+Use Candidate 2.
+```
 
 ## 10. Generate or import a finished sequence
 
 Planning commands do not generate video. Video begins only after an explicit sequence-generation instruction and the required paid-attempt confirmation.
+
+For the local MiniMax H3 workflow:
+
+1. Lock the numbered assets and approve the relevant storyboard panel.
+2. Ask Studio to render the sequence.
+3. Open Movie Workspace and run the prepared immutable job.
+4. Runtime preflight validates hardware, models, workflow checksum, node schemas, references, mode, settings, and resume state.
+5. The result stops at the Review Gate. Approve, Edit and Retry, Reroll, Generate Another Candidate, Compare, Approve and Stop, or Reject.
+
+Studio never hands arbitrary URLs or paths to ComfyUI. It resolves the stable references in the immutable snapshot, retrieves only matching localhost project files, verifies their stored fingerprints, checks type and size, and stages the approved images through the ComfyUI input endpoint. A missing storyboard, character identity, model, node, or checkpoint is a blocking preflight error—not a fallback to sample workflow media.
 
 For an external Seedance workflow:
 
@@ -164,11 +217,11 @@ For an external Seedance workflow:
 4. Import the finished clip back into the matching sequence.
 5. Validate the result against references, dialogue, timing, and continuity.
 
-The Studio is provider-independent: it prepares and preserves the contract but does not pretend an external clip exists before it is received.
+The Studio is provider-independent: it prepares and preserves the contract but does not pretend a local or external clip exists before it is received.
 
 ## 11. Continue into the next sequence
 
-After validation, record or extract the ending frame and approve the closing state. Sequence 2 should open from the preserved result of Sequence 1 rather than reconstructing continuity from memory.
+After validation, approve the candidate. Studio creates an immutable structured handoff. Sequence 2 consumes the approved video, ending/context frames, supported latent and audio context, complete object/environment state, motion and screen direction—not only a reconstructed last frame.
 
 Repeat this loop:
 

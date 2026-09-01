@@ -31,6 +31,21 @@ import {
 } from './production-control';
 import type { DecisionPin } from './production-control';
 import type { StudioBrainResult, StudioBrainSequence, StudioMovieBlueprint } from './studio-brain';
+import {
+  approveStoryboard,
+  createStoryboard,
+  editH3Prompt,
+  initializeLocalProduction,
+  pauseLocalQueue,
+  queueLocalSequenceRange,
+  resumeLocalQueue,
+  recompileH3Prompt,
+  selectCandidate,
+  setH3Mode,
+  updateStoryboardPanel,
+  updateLocalGenerationSettings,
+} from './local-production';
+import type { H3GenerationMode, LocalProductionState } from './local-production';
 
 export type Approval = 'Draft' | 'Approved';
 export type AssetApproval = 'Pending' | 'Approved' | 'Locked' | 'Needs Review';
@@ -299,8 +314,9 @@ export interface StudioMessage {
   content: string;
   createdAt: string;
   metadata?: {
-    kind?: 'story' | 'script' | 'scenario' | 'prompt' | 'bible' | 'world' | 'assets' | 'asset-generation' | 'sequence' | 'scene' | 'graph' | 'coverage' | 'lookahead' | 'status' | 'readiness' | 'timing' | 'dialogue' | 'reference-package' | 'queue' | 'validation' | 'assembly' | 'approval' | 'export' | 'flat-assets' | 'attachment' | 'import' | 'control' | 'integrity' | 'note';
+    kind?: 'story' | 'script' | 'scenario' | 'prompt' | 'bible' | 'world' | 'assets' | 'asset-generation' | 'sequence' | 'scene' | 'graph' | 'coverage' | 'lookahead' | 'status' | 'readiness' | 'timing' | 'dialogue' | 'reference-package' | 'queue' | 'validation' | 'assembly' | 'approval' | 'export' | 'flat-assets' | 'attachment' | 'import' | 'control' | 'integrity' | 'engine' | 'storyboard' | 'workspace' | 'candidate' | 'h3-prompt' | 'note';
     sequenceNumber?: number;
+    sequenceNumbers?: number[];
     assetIds?: string[];
     attachmentId?: string;
   };
@@ -422,6 +438,7 @@ export interface StudioProject {
     privacyMode: boolean;
   };
   production: ProductionSystem;
+  localProduction: LocalProductionState;
 }
 
 export interface ProjectSummary {
@@ -1076,7 +1093,7 @@ function buildPrompt(
 }
 
 function makeSequences(
-  project: Omit<StudioProject, 'sequences' | 'production'> & { sequences?: StudioSequence[] },
+  project: Omit<StudioProject, 'sequences' | 'production' | 'localProduction'> & { sequences?: StudioSequence[] },
   creativePlan: StudioBrainSequence[] = [],
 ): StudioSequence[] {
   const beats = ['Arrival', 'Orientation', 'First disturbance', 'Discovery', 'Escalation', 'Point of no return', 'Revelation', 'Confrontation', 'Reversal', 'Final pursuit', 'Climax', 'Aftermath'];
@@ -1197,7 +1214,8 @@ export function createProjectFromIdea(idea: string, brainResult?: StudioBrainRes
     characterRules: ['One stable identity per character asset ID.', 'Wardrobe, position, injuries, dirt, wetness, and held objects carry forward.'],
     visualRules: ['Grounded cinematic realism with restrained stylization.', 'Motivated camera movement; no decorative coverage that breaks geography.'],
     soundRules: [
-      'Seedance generates spoken dialogue, ambience, effects, requested music, and intentional silence inside the video from scenario instructions.',
+      'The selected verified audiovisual provider may generate spoken dialogue, ambience, effects, requested music, and intentional silence inside the video from scenario instructions.',
+      'MiniMax H3 audiovisual generation is available only when the installed H3 mode, checkpoint, and ComfyUI workflow validate support; Seedance remains a supported provider translation.',
       'Continuity Studio creates no separate voice, ambience, sound-effect, or music asset library.',
       'Preserve environmental perspective and exact speaker ownership. No music or subtitles unless the user adds them to the Film Bible.',
     ],
@@ -1206,7 +1224,7 @@ export function createProjectFromIdea(idea: string, brainResult?: StudioBrainRes
   };
   const visualStyle = blueprint?.visualStyle || (genre === 'Horror' ? 'Grounded atmospheric realism with controlled shadows and tactile texture' : 'Grounded cinematic realism with coherent production design');
   const lightingDirection = blueprint?.lightingDirection || (/night|dark/i.test(idea) ? 'Motivated night sources with protected facial identity' : 'Motivated naturalistic light with consistent direction');
-  const projectBase: Omit<StudioProject, 'sequences' | 'production'> = {
+  const projectBase: Omit<StudioProject, 'sequences' | 'production' | 'localProduction'> = {
     id: projectId, storageRevision: 0, title, createdAt, updatedAt: createdAt, pinned: false, archived: false, idea,
     durationSeconds, sequenceDurationSeconds, sequenceCount, genre, subgenre, setting, region, period,
     dialogueLanguage: blueprint?.dialogueLanguage ?? 'Story-defined', aspectRatio: '16:9', resolution: '4K',
@@ -1214,7 +1232,7 @@ export function createProjectFromIdea(idea: string, brainResult?: StudioBrainRes
     cameraStyle: blueprint?.cameraStyle || 'Deliberate, motivated movement with stable screen direction', lensDirection: blueprint?.lensDirection || '35mm and 50mm natural-perspective language',
     lightingDirection,
     colorDirection: blueprint?.colorDirection || (genre === 'Horror' ? 'Muted earth tones, deep navy shadows, restrained warm practicals' : 'Natural color with a controlled tonal arc'),
-    soundDirection: 'Seedance in-video generation from exact dialogue, physical ambience, requested effects or music, and purposeful silence instructions', story, filmBible,
+    soundDirection: 'Provider-capability-aware in-video audiovisual generation from exact dialogue, physical ambience, requested effects or music, and purposeful silence instructions', story, filmBible,
     worldBible: blueprint ? { version: 1, status: 'Draft', ...blueprint.worldBible } : makeWorldBible({ idea, region, period, setting, genre, visualStyle, lightingDirection }),
     locations: [],
     environments: [],
@@ -1251,9 +1269,10 @@ export function createProjectFromIdea(idea: string, brainResult?: StudioBrainRes
   projectBase.flatAssetFolder.nextUnusedNumber = projectBase.assets.length + 1;
   projectBase.locations = makeLocations(projectBase);
   projectBase.environments = makeEnvironments(projectBase);
-  const project = { ...projectBase, sequences: makeSequences(projectBase, blueprint?.sequences), production: undefined as unknown as ProductionSystem } as StudioProject;
+  const project = { ...projectBase, sequences: makeSequences(projectBase, blueprint?.sequences), production: undefined as unknown as ProductionSystem, localProduction: undefined as unknown as LocalProductionState } as StudioProject;
   project.knowledgeGraph = makeKnowledgeGraph(project);
   project.production = initializeProductionSystem(project);
+  project.localProduction = initializeLocalProduction(project);
   return normalizeProject(project);
 }
 
@@ -1288,12 +1307,13 @@ export function normalizeProject(project: StudioProject): StudioProject {
     visualStyle: fallbackVisualStyle,
     lightingDirection: fallbackLighting,
   });
-  next.filmBible.soundRules = (next.filmBible.soundRules ?? []).filter((rule) => !/(voice|ambience|sound.?effect|music).*(asset|library)|separate audio/i.test(rule));
-  const seedanceSoundRules = [
-    'Seedance generates spoken dialogue, ambience, effects, requested music, and intentional silence inside the video from scenario instructions.',
+  next.filmBible.soundRules = (next.filmBible.soundRules ?? []).filter((rule) => !/(voice|ambience|sound.?effect|music).*(asset|library)|separate audio|^Seedance generates spoken dialogue/i.test(rule));
+  const audiovisualSoundRules = [
+    'The selected verified audiovisual provider may generate spoken dialogue, ambience, effects, requested music, and intentional silence inside the video from scenario instructions.',
+    'MiniMax H3 audiovisual generation is available only when the installed H3 mode, checkpoint, and ComfyUI workflow validate support; Seedance remains a supported provider translation.',
     'Continuity Studio creates no separate voice, ambience, sound-effect, or music asset library.',
   ];
-  for (const rule of seedanceSoundRules) if (!next.filmBible.soundRules.includes(rule)) next.filmBible.soundRules.push(rule);
+  for (const rule of audiovisualSoundRules) if (!next.filmBible.soundRules.includes(rule)) next.filmBible.soundRules.push(rule);
   const flatRule = 'SINGLE FLAT ASSET FOLDER RULE: every approved generated visual production asset lives in one project asset folder with no subfolders.';
   if (!next.worldBible.objectRules.includes(flatRule)) {
     next.worldBible.objectRules = [
@@ -1381,7 +1401,8 @@ export function normalizeProject(project: StudioProject): StudioProject {
     };
   });
   next.knowledgeGraph = makeKnowledgeGraph(next);
-  return refreshProductionSystem(next);
+  refreshProductionSystem(next);
+  return next;
 }
 
 export function projectProgress(project: StudioProject) {
@@ -1471,7 +1492,7 @@ function decisionPinTarget(project: StudioProject, input: string): Omit<Decision
   return null;
 }
 
-export function interpretStudioMessage(project: StudioProject, input: string, options?: { preferredAttachmentId?: string; imageGenerationAvailable?: boolean; brainResult?: StudioBrainResult | null }): { project: StudioProject; response: StudioMessage; sideEffect?: 'export' | 'asset-export' | 'image-generation' } {
+export function interpretStudioMessage(project: StudioProject, input: string, options?: { preferredAttachmentId?: string; imageGenerationAvailable?: boolean; brainResult?: StudioBrainResult | null }): { project: StudioProject; response: StudioMessage; sideEffect?: 'export' | 'asset-export' | 'image-generation' | 'local-generation' } {
   const next = normalizeProject(project);
   const preferredAttachment = options?.preferredAttachmentId
     ? next.attachments.find((attachment) => attachment.id === options.preferredAttachmentId)
@@ -1487,6 +1508,168 @@ export function interpretStudioMessage(project: StudioProject, input: string, op
     };
   }
   buildRelevantProjectContext(next, input);
+
+  if (/\b(?:generate|create|build|prepare) (?:the |a |my )?(?:master )?storyboard\b/.test(lower)) {
+    const requestedPanels = Number(lower.match(/(\d+)\s*(?:panel|frame)/)?.[1] ?? 0);
+    const prior = next.localProduction.storyboards[0];
+    const board = createStoryboard(next, requestedPanels || Math.max(16, next.sequenceCount), prior);
+    next.localProduction.storyboards[0] = board;
+    next.localProduction = initializeLocalProduction(next, next.localProduction);
+    return {
+      project: next,
+      response: message(`The ${board.panelCount}-panel Krea 2 master storyboard is prepared as one continuity-aware board. Every panel has a stable label, sequence binding, numbered character/location/prop references, wardrobe state, camera direction, seed, version, and lineage. This explicit request authorizes the local storyboard job; it will remain recoverable and no panel will replace approved work silently.`, { kind: 'storyboard' }),
+      sideEffect: 'local-generation',
+    };
+  }
+
+  if (/approve all (?:the )?storyboard panels|approve (?:the )?(?:entire|whole|master) storyboard/.test(lower)) {
+    const count = approveStoryboard(next);
+    return { project: next, response: message(count ? `Approved all ${count} storyboard panels. Their current versions are now the composition authority for their bound sequences; later panel changes will stale only those dependent sequence translations.` : 'No storyboard exists yet. Ask me to generate the storyboard first.', { kind: 'storyboard' }) };
+  }
+
+  const panelLabelMatch = input.match(/\b([A-Z]{1,3}\d{1,2})\b/i);
+  if (panelLabelMatch && /\bregenerate\b/i.test(input)) {
+    const panel = updateStoryboardPanel(next, panelLabelMatch[1], input.replace(/\bregenerate(?: only)?\s+[A-Z]{1,3}\d{1,2}\b[.:]?/i, '').trim(), true);
+    return panel
+      ? { project: next, response: message(`Prepared a scoped regeneration for storyboard panel ${panel.label} v${panel.version}. Every other panel, seed, approval, file, and lineage entry is preserved unchanged.`, { kind: 'storyboard', sequenceNumber: panel.sequenceNumber ?? undefined }), sideEffect: 'local-generation' }
+      : { project: next, response: message(`Storyboard panel ${panelLabelMatch[1].toUpperCase()} does not exist on the current board, so nothing changed.`, { kind: 'storyboard' }) };
+  }
+
+  if (panelLabelMatch && /\b(?:make|change|edit|update)\b/i.test(input)) {
+    const panel = updateStoryboardPanel(next, panelLabelMatch[1], input, false);
+    if (panel) return { project: next, response: message(`Updated only storyboard panel ${panel.label} as v${panel.version} and marked its dependent Sequence ${panel.sequenceNumber ?? 'binding'} stale. Every unrelated panel and approved sequence remains intact.`, { kind: 'storyboard', sequenceNumber: panel.sequenceNumber ?? undefined }) };
+  }
+
+  const h3SettingSignal = /\b(?:h3|context length|audio context|candidate count|sampler|scheduler|resolution|seed|steps)\b/.test(lower) && /\b(?:set|use|change)\b/.test(lower);
+  if (h3SettingSignal) {
+    const sequenceNumber = Number(lower.match(/sequence\s*0*(\d+)/)?.[1] ?? next.currentSequence);
+    const resolution = lower.match(/(?:resolution\s*(?:to|=)?\s*)?(\d{3,4})\s*[x×]\s*(\d{3,4})/);
+    const seed = lower.match(/\bseed\s*(?:to|=)?\s*(\d+)/);
+    const steps = lower.match(/\bsteps?\s*(?:to|=)?\s*(\d+)/);
+    const context = lower.match(/(?<!audio\s)\bcontext(?: length| frames?)?\s*(?:to|=)?\s*(\d+)/);
+    const audioContext = lower.match(/\baudio context(?: length| frames?)?\s*(?:to|=)?\s*(\d+)/);
+    const candidateCount = lower.match(/\bcandidate count\s*(?:to|=)?\s*(\d+)/);
+    const sampler = lower.match(/\bsampler\s*(?:to|=)?\s*([a-z0-9_+.-]+)/);
+    const scheduler = lower.match(/\bscheduler\s*(?:to|=)?\s*([a-z0-9_+.-]+)/);
+    const lora = lower.match(/\b(?:use|set)\s+lora\s+([a-z0-9_+.-]+)(?:\s+(?:at|strength)\s*(-?\d+(?:\.\d+)?))?/);
+    const settings: Parameters<typeof updateLocalGenerationSettings>[2] = {};
+    if (resolution) { settings.width = Number(resolution[1]); settings.height = Number(resolution[2]); }
+    if (seed) settings.seed = Number(seed[1]);
+    if (steps) settings.steps = Number(steps[1]);
+    if (context) settings.contextFrames = Number(context[1]);
+    if (audioContext) settings.audioContextFrames = Number(audioContext[1]);
+    if (candidateCount) settings.candidateCount = Number(candidateCount[1]);
+    if (sampler) settings.sampler = sampler[1];
+    if (scheduler) settings.scheduler = scheduler[1];
+    if (lora) settings.loras = [{ id: lora[1], strength: Number(lora[2] ?? 1) }];
+    if (Object.keys(settings).length) {
+      const workspace = updateLocalGenerationSettings(next, sequenceNumber, settings);
+      return workspace
+        ? { project: next, response: message(`Sequence ${sequenceNumber} local generation settings are now ${workspace.width}×${workspace.height}, seed ${workspace.seed}, ${workspace.steps} steps, ${workspace.sampler}/${workspace.scheduler}, ${workspace.contextFrames} context frames, ${workspace.audioContextFrames} audio-context frames, ${workspace.candidateCount} candidate${workspace.candidateCount === 1 ? '' : 's'}, and ${workspace.loras.length ? workspace.loras.map((item) => `${item.id}@${item.strength}`).join(', ') : 'no LoRA override'}. The next immutable snapshot will freeze these values.`, { kind: 'workspace', sequenceNumber }) }
+        : { project: next, response: message(`Sequence ${sequenceNumber} does not exist, so no local generation settings changed.`, { kind: 'workspace' }) };
+    }
+  }
+
+  const h3ModeMatch = lower.match(/\b(?:use|set|switch to)\s+(?:minimax\s+)?h3\s+(t2va|i2va|fl2va|l2va|ref2va)\b/);
+  if (h3ModeMatch) {
+    const mode = h3ModeMatch[1].toUpperCase() as H3GenerationMode;
+    const sequenceNumber = Number(lower.match(/sequence\s*0*(\d+)/)?.[1] ?? next.currentSequence);
+    const workspace = setH3Mode(next, sequenceNumber, mode, 'manual');
+    return workspace
+      ? { project: next, response: message(`Sequence ${sequenceNumber} now uses the manual MiniMax H3 ${mode} compiler. The stable Studio tags were resolved into a snapshot-specific native reference mapping. ${mode === 'Ref2VA' ? 'Execution stays blocked until the runtime validates a genuine Ref2VA checkpoint; the supplied workflow currently points at an FL2VA file and will not be mislabeled.' : ''}`, { kind: 'h3-prompt', sequenceNumber }) }
+      : { project: next, response: message(`Sequence ${sequenceNumber} does not exist, so the H3 mode was not changed.`, { kind: 'h3-prompt' }) };
+  }
+
+  if (/\bregenerate\b.*\b(?:minimax\s+)?h3\b.*\bprompt\b|\bregenerate\b.*\bh3 prompt\b/.test(lower)) {
+    const sequenceNumber = Number(lower.match(/sequence\s*0*(\d+)/)?.[1] ?? next.currentSequence);
+    const translation = recompileH3Prompt(next, sequenceNumber);
+    return translation
+      ? { project: next, response: message(`Recompiled the MiniMax H3 ${translation.mode} prompt for Sequence ${sequenceNumber} from the current canonical intention, approved asset versions, storyboard binding, stable reference schedule, complete continuity state, correction memory, exact dialogue, and Film/World Bibles. No video job was created.`, { kind: 'h3-prompt', sequenceNumber }) }
+      : { project: next, response: message(`Sequence ${sequenceNumber} does not exist, so no H3 prompt changed.`, { kind: 'h3-prompt' }) };
+  }
+
+  const h3EditMatch = input.match(/(?:revise|edit|change) (?:the )?(?:MiniMax )?H3 prompt(?: for)?(?: Sequence)?\s*0*(\d+)?\s*:\s*(.+)$/i);
+  if (h3EditMatch) {
+    const sequenceNumber = Number(h3EditMatch[1] || next.currentSequence);
+    const translation = editH3Prompt(next, sequenceNumber, h3EditMatch[2]);
+    return translation
+      ? { project: next, response: message(`Updated only the MiniMax H3 provider translation for Sequence ${sequenceNumber}. The canonical production intention and higher-authority continuity constraints remain unchanged, and the edit will be frozen with the next immutable generation snapshot.`, { kind: 'h3-prompt', sequenceNumber }) }
+      : { project: next, response: message(`Sequence ${sequenceNumber} does not exist, so no H3 prompt changed.`, { kind: 'h3-prompt' }) };
+  }
+
+  if (/\b(?:make|set) (?:the )?(?:next )?(?:scene|sequence).{0,30}continue directly|\bdirect continuation\b/.test(lower)) {
+    const sequenceNumber = Number(lower.match(/sequence\s*0*(\d+)/)?.[1] ?? Math.min(next.sequenceCount, next.currentSequence + 1));
+    const sequence = next.sequences.find((item) => item.number === sequenceNumber);
+    const workspace = sequence ? next.localProduction.sequenceWorkspaces[sequence.id] : undefined;
+    if (workspace) {
+      workspace.continuationMode = 'Direct continuation';
+      workspace.staleReasons = [...new Set([...workspace.staleReasons, 'Continuation mode changed; recompile and verify the previous approved handoff.'])];
+      return { project: next, response: message(`Sequence ${sequenceNumber} is now a direct continuation. It must consume the previous approved video, context frames, audio context where supported, and the complete structured handoff—not only the last frame.`, { kind: 'workspace', sequenceNumber }) };
+    }
+  }
+
+  const renderRange = lower.match(/\brender sequences?\s*0*(\d+)(?:\s*(?:through|to|-)\s*0*(\d+))?/);
+  if (renderRange) {
+    const from = Number(renderRange[1]);
+    const through = Number(renderRange[2] ?? renderRange[1]);
+    const jobs = queueLocalSequenceRange(next, from, through);
+    const sequenceNumbers = jobs.map((job) => job.sequenceNumber);
+    return {
+      project: next,
+      response: message(jobs.length ? `Prepared ${jobs.length} immutable local MiniMax H3 job${jobs.length === 1 ? '' : 's'} for Sequence${jobs.length === 1 ? '' : 's'} ${sequenceNumbers.join(', ')}. Each snapshot contains the canonical intention, official H3 translation, stable-to-native reference mapping, schedule, seed, steps, resolution, pinned workflow checksum, and continuation requirements. Runtime preflight still controls actual GPU submission.` : 'No new jobs were added; the requested sequences already have active local jobs or fall outside the movie.', { kind: 'queue', sequenceNumbers }),
+      sideEffect: jobs.length ? 'local-generation' : undefined,
+    };
+  }
+
+  if (/\bpause (?:the )?(?:rendering|render queue|production queue)\b/.test(lower)) {
+    const count = pauseLocalQueue(next);
+    return { project: next, response: message(`Paused ${count} local job${count === 1 ? '' : 's'}. Completed outputs and transactional snapshots remain intact for verified resume.`, { kind: 'queue' }) };
+  }
+
+  const resumeMatch = lower.match(/\bresume rendering(?: from sequence\s*0*(\d+))?|\bresume from sequence\s*0*(\d+)/);
+  if (resumeMatch) {
+    const from = Number(resumeMatch[1] ?? resumeMatch[2] ?? 1);
+    const count = resumeLocalQueue(next, from);
+    return { project: next, response: message(`Prepared ${count} paused or failed local job${count === 1 ? '' : 's'} to resume from Sequence ${from}. The runtime must verify checkpoint and file history before continuing.`, { kind: 'queue' }), sideEffect: count ? 'local-generation' : undefined };
+  }
+
+  if (/\bedit and retry\b|\b(?:face|identity|wardrobe|prop|vehicle|lighting|weather|camera|dialogue|audio).{0,40}(?:changed|drifted|failed|wrong)|\bfix (?:his|her|their|the)?\s*(?:face|identity|wardrobe|prop|vehicle|lighting|weather|camera|dialogue|audio)\b/.test(lower)) {
+    const targetSequence = Number(lower.match(/sequence\s*0*(\d+)/)?.[1] ?? next.currentSequence);
+    const correction = input.replace(/\bedit and retry(?: sequence\s*0*\d+)?\s*:?/i, '').trim() || 'Preserve every approved element except the explicitly described failed continuity dimension.';
+    editH3Prompt(next, targetSequence, `scoped_retry_correction: ${correction}\nPreserve every unrelated approved identity, composition, action, timing, dialogue, environment, and continuity state.`);
+    const jobs = queueLocalSequenceRange(next, targetSequence, targetSequence, true);
+    const candidate = jobs[0] ? next.localProduction.candidates.find((item) => item.id === jobs[0].candidateId) : null;
+    if (candidate) candidate.correctionScope = correction;
+    return { project: next, response: message(jobs.length ? `Prepared a scoped retry candidate for Sequence ${targetSequence}. Correction: ${correction} The prior candidate and every approved unrelated result remain immutable for comparison.` : `Sequence ${targetSequence} could not be queued for a scoped retry.`, { kind: 'candidate', sequenceNumber: targetSequence }), sideEffect: jobs.length ? 'local-generation' : undefined };
+  }
+
+  if (/\bgenerate another candidate\b|\breroll(?: this| the)? sequence\b/.test(lower)) {
+    const targetSequence = Number(lower.match(/sequence\s*0*(\d+)/)?.[1] ?? next.currentSequence);
+    const jobs = queueLocalSequenceRange(next, targetSequence, targetSequence, true);
+    return { project: next, response: message(`Prepared Candidate ${next.localProduction.candidates.filter((candidate) => candidate.sequenceNumber === targetSequence).length} for Sequence ${targetSequence} with a separate immutable snapshot. Existing candidates are retained for comparison and are not overwritten.`, { kind: 'candidate', sequenceNumber: targetSequence }), sideEffect: jobs.length ? 'local-generation' : undefined };
+  }
+
+  const useCandidateMatch = lower.match(/\b(?:use|approve) candidate\s*(\d+)/);
+  if (useCandidateMatch) {
+    const targetSequence = Number(lower.match(/sequence\s*0*(\d+)/)?.[1] ?? next.currentSequence);
+    const candidates = next.localProduction.candidates.filter((candidate) => candidate.sequenceNumber === targetSequence).sort((left, right) => left.createdAt.localeCompare(right.createdAt));
+    const candidate = candidates[Number(useCandidateMatch[1]) - 1];
+    const selected = candidate ? selectCandidate(next, candidate.id) : null;
+    const stopped = selected && /\band stop\b/.test(lower) ? pauseLocalQueue(next) : 0;
+    return selected
+      ? { project: next, response: message(`Approved Candidate ${useCandidateMatch[1]} for Sequence ${selected.sequenceNumber} and created an immutable structured continuity handoff. Other candidates remain in history as rejected, superseded, or available comparison evidence.${stopped ? ` Paused ${stopped} remaining local job${stopped === 1 ? '' : 's'} at safe boundaries.` : ''}`, { kind: 'candidate', sequenceNumber: selected.sequenceNumber }) }
+      : { project: next, response: message(`Candidate ${useCandidateMatch[1]} does not exist for Sequence ${targetSequence}, so nothing changed.`, { kind: 'candidate', sequenceNumber: targetSequence }) };
+  }
+
+  if (/\breject (?:the )?(?:current|latest)?\s*candidate\b/.test(lower)) {
+    const targetSequence = Number(lower.match(/sequence\s*0*(\d+)/)?.[1] ?? next.currentSequence);
+    const candidate = next.localProduction.candidates.filter((item) => item.sequenceNumber === targetSequence).at(-1);
+    if (!candidate) return { project: next, response: message(`Sequence ${targetSequence} has no candidate to reject.`, { kind: 'candidate', sequenceNumber: targetSequence }) };
+    candidate.status = 'Rejected';
+    const job = next.localProduction.queue.find((item) => item.candidateId === candidate.id);
+    if (job && !['Approved', 'Cancelled', 'Failed'].includes(job.status)) job.status = 'Cancelled';
+    return { project: next, response: message(`Rejected Candidate ${next.localProduction.candidates.filter((item) => item.sequenceNumber === targetSequence).length} for Sequence ${targetSequence}. Its snapshot, prompt, references, seed, output, and provenance remain in history and no approved result was replaced.`, { kind: 'candidate', sequenceNumber: targetSequence }) };
+  }
 
   const pinTarget = decisionPinTarget(next, input);
   if (pinTarget && /(?:^|\b)(?:release|unlock)\b|approve (?:changing|change to)/i.test(input)) {
@@ -1973,7 +2156,7 @@ export function interpretStudioMessage(project: StudioProject, input: string, op
     Object.values(next.production.characterStates).forEach((state) => { state.languageLock = language; state.dialectLock = dialect; });
     Object.values(next.production.sequencePlans).flatMap((plan) => plan.dialogue).forEach((line) => { line.language = language; line.languageLock = language; line.dialect = dialect; line.dialectLock = dialect; });
     refreshProductionSystem(next);
-    return { project: next, response: message(`Project dialogue language is locked to ${language} and project dialect to ${dialect}. Character-specific locks may override this only when explicitly recorded. These are script and Seedance prompt metadata, never audio assets.`, { kind: 'dialogue' }) };
+    return { project: next, response: message(`Project dialogue language is locked to ${language} and project dialect to ${dialect}. Character-specific locks may override this only when explicitly recorded. These are script and provider-prompt metadata, never audio assets.`, { kind: 'dialogue' }) };
   }
 
   const languageLockMatch = input.match(/asset\s*0*(\d+)\s+speaks\s+(.+?)\s+with\s+(.+?)\s+dialect(?:\s+in\s+sequence\s+\d+)?$/i)
@@ -1995,7 +2178,7 @@ export function interpretStudioMessage(project: StudioProject, input: string, op
     if (!lines.length) return { project: next, response: message(`No exact dialogue in ${sequence.id} contains “${pronunciationMatch[1]}”, so the script was not changed.`, { kind: 'dialogue', sequenceNumber: sequence.number }) };
     lines.forEach((line) => { line.pronunciations = [...line.pronunciations.filter((item) => item.text.toLowerCase() !== pronunciationMatch[1].toLowerCase()), { text: pronunciationMatch[1], pronunciation: pronunciationMatch[2] }]; });
     refreshProductionSystem(next);
-    return { project: next, response: message(`Pronunciation metadata is locked in ${sequence.id}: “${pronunciationMatch[1]}” → “${pronunciationMatch[2]}” for ${lines.map((line) => line.dialogueId).join(', ')}. Seedance receives it inside the exact dialogue prompt; no voice or audio file exists.`, { kind: 'dialogue', sequenceNumber: sequence.number }) };
+    return { project: next, response: message(`Pronunciation metadata is locked in ${sequence.id}: “${pronunciationMatch[1]}” → “${pronunciationMatch[2]}” for ${lines.map((line) => line.dialogueId).join(', ')}. Every verified audiovisual provider receives it inside the exact dialogue prompt; no voice or audio file exists.`, { kind: 'dialogue', sequenceNumber: sequence.number }) };
   }
 
   const nonSpeakingMatch = input.match(/asset\s*0*(\d+)\s+(?:is|must be|remains)\s+non[- ]speaking/i);
@@ -2006,7 +2189,7 @@ export function interpretStudioMessage(project: StudioProject, input: string, op
     plan.dialogue = plan.dialogue.filter((line) => line.speakerAssetId !== character.id);
     plan.scenario.nonSpeakingCharacterAssetIds = [...new Set([...plan.scenario.nonSpeakingCharacterAssetIds, character.id])];
     refreshProductionSystem(next);
-    return { project: next, response: message(`Asset ${formatAssetNumber(character.projectNumber)} is present but explicitly non-speaking in ${sequence.id}. Seedance is instructed not to give that character words, lip movement, or another speaker’s line.`, { kind: 'dialogue', sequenceNumber: sequence.number, assetIds: [character.id] }) };
+    return { project: next, response: message(`Asset ${formatAssetNumber(character.projectNumber)} is present but explicitly non-speaking in ${sequence.id}. Provider translations are instructed not to give that character words, lip movement, or another speaker’s line.`, { kind: 'dialogue', sequenceNumber: sequence.number, assetIds: [character.id] }) };
   }
 
   const ownedActionMatch = input.match(/asset\s*0*(\d+)\s+(holds|carries|picks? up|uses|opens|closes|drops|passes)\s+asset\s*0*(\d+)(?:\s+(?:in|with|using)\s+(left|right|both)(?:\s+hand)?)?/i);
@@ -2040,7 +2223,7 @@ export function interpretStudioMessage(project: StudioProject, input: string, op
   const correctionInstruction = input.match(/(?:remember (?:this )?correction|correction memory|production rule)\s*[:-]\s*(.+)$/i)?.[1]?.trim();
   if (correctionInstruction) {
     const rule = rememberCorrection(next, correctionInstruction, sequenceNumber || null);
-    return { project: next, response: message(`Correction ${rule.id} is now active${rule.sequenceNumber ? ` for Sequence ${rule.sequenceNumber}` : ' across the movie'}. It will be compiled into future Seedance packages and validation without rewriting approved scenario content.`, { kind: 'readiness', sequenceNumber: rule.sequenceNumber ?? next.currentSequence }) };
+    return { project: next, response: message(`Correction ${rule.id} is now active${rule.sequenceNumber ? ` for Sequence ${rule.sequenceNumber}` : ' across the movie'}. It will be compiled into future H3 and Seedance translations and validation without rewriting approved scenario content.`, { kind: 'readiness', sequenceNumber: rule.sequenceNumber ?? next.currentSequence }) };
   }
 
   const knowledgeMatch = input.match(/asset\s*0*(\d+)\s+(knows|witnessed|heard|met|learned|believes|hides)\s+(?:that\s+)?(.+?)(?:\s+in\s+sequence\s+\d+)?$/i);
@@ -2080,7 +2263,7 @@ export function interpretStudioMessage(project: StudioProject, input: string, op
     if (dialoguePins.length) return { project: next, response: message(`${sequence.id} dialogue is protected by approved pin ${dialoguePins[0].id}. Explicitly unlock the dialogue before adding or changing a line; nothing changed.`, { kind: 'control', sequenceNumber: sequence.number }) };
     if (asset.category !== 'Characters') return { project: next, response: message(`${assetProductionReference(asset)} cannot own spoken dialogue because it is not a character identity. Choose the exact numbered character speaker; no line was stored.`, { kind: 'dialogue', sequenceNumber: sequence.number, assetIds: [asset.id] }) };
     addDialogueLine(next, sequence, asset, exactDialogue);
-    return { project: next, response: message(`${assetProductionReference(asset)} now owns the exact line “${exactDialogue}” in ${sequence.id}. Turn order, language, dialect, emotion, expression, timing, physical action, addressee, reactions, current costume, and approved visual bindings are stored with the line. Seedance generates the spoken result inside the video; no separate sound asset is created.`, { kind: 'dialogue', sequenceNumber: sequence.number, assetIds: [asset.id] }) };
+    return { project: next, response: message(`${assetProductionReference(asset)} now owns the exact line “${exactDialogue}” in ${sequence.id}. Turn order, language, dialect, emotion, expression, timing, physical action, addressee, reactions, current costume, and approved visual bindings are stored with the line. A verified MiniMax H3 or Seedance mode generates the spoken result inside the video; no separate sound asset is created.`, { kind: 'dialogue', sequenceNumber: sequence.number, assetIds: [asset.id] }) };
   }
   if (sequence && /regenerate.*(?:script|screenplay)|(?:script|screenplay).*regenerate/.test(lower)) {
     const plan = next.production.sequencePlans[sequence.id];
@@ -2232,7 +2415,7 @@ export function interpretStudioMessage(project: StudioProject, input: string, op
     const checkpoint = approveSequenceAndCheckpoint(next, sequence);
     resolveDependencyTarget(next, sequence.id, `${sequence.id} revision V${String(checkpoint.sequenceRevision).padStart(2, '0')} approved and checkpointed.`);
     if (next.sequences.every((item) => item.status === 'Approved')) next.stage = 'Assembly';
-    return { project: next, response: message(`${sequence.id} revision V${String(checkpoint.sequenceRevision).padStart(2, '0')} is approved and locked. Checkpoint ${checkpoint.id} preserves asset, spatial, physical, environmental, lighting, time, Seedance sound-instruction, entry/exit, and object states as the expected opening for ${following?.id ?? 'final assembly'}.${checkpoint.lastFrameKey ? ` The generated result supplied continuity frame ${checkpoint.lastFrameKey} automatically.` : ' Import the generated video result to create its first-frame and last-frame continuity keys automatically.'}`, { kind: 'validation', sequenceNumber: sequence.number }) };
+    return { project: next, response: message(`${sequence.id} revision V${String(checkpoint.sequenceRevision).padStart(2, '0')} is approved and locked. Checkpoint ${checkpoint.id} preserves asset, spatial, physical, environmental, lighting, time, audiovisual, entry/exit, and object states as the expected opening for ${following?.id ?? 'final assembly'}.${checkpoint.lastFrameKey ? ` The generated result supplied continuity frame ${checkpoint.lastFrameKey} automatically.` : ' Import the generated video result to create its first-frame and last-frame continuity keys automatically.'}`, { kind: 'validation', sequenceNumber: sequence.number }) };
   }
   if (sequence && /prepare (?:an )?(?:external )?(?:seedance )?(?:package|workflow)/.test(lower)) {
     if (!canPerformProjectAction(next, 'prepare-generation')) return { project: next, response: message(`Generation preparation is not legal while the project is ${next.production.control.stateMachine.current}. Complete the state-machine blockers first; no prompt or paid request was created.`, { kind: 'control', sequenceNumber: sequence.number }) };

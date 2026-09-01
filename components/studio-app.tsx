@@ -47,11 +47,13 @@ import { compactProjectForBrain, parseStudioBrainResult, type StudioBrainResult 
 import { cn } from '@/lib/utils';
 import type { ProjectSummary, StudioAsset, StudioMessage, StudioProject, StudioSequence } from '@/lib/studio';
 
-type View = 'chat' | 'projects' | 'assets' | 'exports' | 'advanced' | 'settings';
+type View = 'chat' | 'projects' | 'workspace' | 'assets' | 'engine' | 'exports' | 'advanced' | 'settings';
 
 const primaryNavigation = [
   { id: 'projects' as const, label: 'Projects', icon: FolderClock },
+  { id: 'workspace' as const, label: 'Movie Workspace', icon: Clapperboard },
   { id: 'assets' as const, label: 'Asset Library', icon: Library },
+  { id: 'engine' as const, label: 'Local AI Engine', icon: Network },
   { id: 'exports' as const, label: 'Exports', icon: Archive },
 ];
 
@@ -60,6 +62,28 @@ const assetFilters = ['All', 'Characters', 'Creatures', 'Animals', 'Locations', 
 type RuntimeCapabilities = {
   imageGeneration: boolean;
   codexBrain: 'checking' | 'connected' | 'fallback';
+  localRuntime: 'checking' | 'ready' | 'blocked' | 'offline';
+};
+
+type LocalRuntimeStatus = {
+  available: boolean;
+  version: string;
+  configuration: { runtimeRoot: string; comfyRoot: string; comfyBaseUrl: string };
+  system: {
+    platform: string;
+    architecture: string;
+    ram: { totalBytes: number; freeBytes: number };
+    gpu: { available: boolean; devices: Array<{ name: string; memoryTotalMb?: number }> };
+    python: { available: boolean; version?: string; output?: string };
+    ffmpeg: { available: boolean; version?: string; output?: string };
+    preset?: { name?: string; id?: string; notes?: string };
+  };
+  engine: { connected: boolean; managedByStudio: boolean; latencyMs?: number; error?: string | null };
+  components: Array<{ id: string; name: string; kind?: string; status: string; installed: boolean; required?: boolean; license?: string; pinnedCommit?: string; error?: string | null }>;
+  models: Array<{ id: string; name: string; status: string; installed: boolean; required?: boolean; path: string; license?: string }>;
+  workflows: Array<{ id: string; name: string; compatible?: boolean; storyboardCompatible?: boolean; h3Compatible?: boolean; sourcePath?: string | null; findings?: Array<{ severity: string; message: string }> }>;
+  operations: Array<{ id: string; kind: string; target: string; status: string; progress: number; message: string }>;
+  jobs: Array<{ id: string; studioJobId?: string | null; candidateId?: string | null; projectId: string; sequenceId: string; target: 'storyboard' | 'h3-chain'; sequenceNumber: number; status: string; progress: number; provider: string; model: string; resolution?: string; durationSeconds?: number; seed?: number; steps?: number; elapsedSeconds: number; output?: Array<{ filename?: string; subfolder?: string; type?: string }>; failure?: string | null; retryCount: number; checkpoint?: unknown; provenance?: Record<string, unknown> }>;
 };
 
 function canReachLocalCodexHost() {
@@ -127,6 +151,7 @@ const documentLabels: Record<ProductionDocumentKind, string> = {
   'film-bible': 'Film Bible',
   sequence: 'Sequence Plan',
   'seedance-prompt': 'Seedance Prompt',
+  'h3-prompt': 'MiniMax H3 Prompt',
 };
 
 function regenerateInstruction(kind: ProductionDocumentKind, sequenceNumber?: number) {
@@ -137,6 +162,7 @@ function regenerateInstruction(kind: ProductionDocumentKind, sequenceNumber?: nu
   if (kind === 'script') return `Regenerate the script for ${sequence}`;
   if (kind === 'scenario') return `Regenerate the scenario for ${sequence}`;
   if (kind === 'seedance-prompt') return `Regenerate the Seedance prompt for ${sequence}`;
+  if (kind === 'h3-prompt') return `Regenerate the MiniMax H3 prompt for ${sequence}`;
   return `Regenerate ${sequence}`;
 }
 
@@ -341,6 +367,7 @@ function AssetsCard({ project, ids, onAction, onOpenLibrary }: { project: Studio
 function SequenceCard({ project, sequence, onAction, onEdit }: { project: StudioProject; sequence: StudioSequence; onAction: (message: string) => void; onEdit: (kind: ProductionDocumentKind, sequenceNumber?: number) => void }) {
   const sequenceDocument = getProductionDocument(project, 'sequence', sequence.number);
   const promptDocument = getProductionDocument(project, 'seedance-prompt', sequence.number);
+  const h3PromptDocument = getProductionDocument(project, 'h3-prompt', sequence.number);
   const plan = project.production.sequencePlans[sequence.id];
   const job = project.production.renderQueue.findLast((item) => item.sequenceNumber === sequence.number);
   const timingAudit = project.production.control.dialogueTimingAudits[sequence.id];
@@ -377,7 +404,7 @@ function SequenceCard({ project, sequence, onAction, onEdit }: { project: Studio
         </div>
         <div className="grid gap-3 text-xs sm:grid-cols-3">
           <StateBlock label="Scenario engine" value={`${plan.scenario.purposeCategory} · ${plan.scenario.actions.length} owned actions · escalation ${plan.scenario.escalationScore}%`} />
-          <StateBlock label="Dialogue & speaker lock" value={`${plan.dialogue.length} exact timed line${plan.dialogue.length === 1 ? '' : 's'} · Seedance generates sound in-video`} />
+          <StateBlock label="Dialogue & speaker lock" value={`${plan.dialogue.length} exact timed line${plan.dialogue.length === 1 ? '' : 's'} · provider-capability audiovisual output`} />
           <StateBlock label="Conflict check" value={plan.conflicts.length ? `${plan.conflicts.length} open` : 'Passed'} />
         </div>
         <div className="grid gap-3 text-xs sm:grid-cols-3">
@@ -400,6 +427,10 @@ function SequenceCard({ project, sequence, onAction, onEdit }: { project: Studio
           <summary className="cursor-pointer text-xs font-medium">Seedance prompt</summary>
           <pre className="mt-3 max-h-48 overflow-auto whitespace-pre-wrap font-mono text-[10px] leading-5 text-muted-foreground">{sequence.prompt}</pre>
         </details>
+        <details className="rounded-xl border border-border bg-background/50 p-3">
+          <summary className="cursor-pointer text-xs font-medium">MiniMax H3 official prompt · {project.localProduction.sequenceWorkspaces[sequence.id].h3Mode}</summary>
+          <pre className="mt-3 max-h-48 overflow-auto whitespace-pre-wrap font-mono text-[10px] leading-5 text-muted-foreground">{h3PromptDocument?.content}</pre>
+        </details>
       </div>
       <div className="flex flex-wrap gap-2 border-t border-border/70 bg-background/35 px-4 py-3">
         <Button size="sm" onClick={() => onAction(`Generate Sequence ${sequence.number}`)}><Play />Generate video</Button>
@@ -410,6 +441,8 @@ function SequenceCard({ project, sequence, onAction, onEdit }: { project: Studio
         <Button size="sm" variant="ghost" onClick={() => onAction(`Regenerate Sequence ${sequence.number}`)}><RefreshCw />Regenerate</Button>
         <Button size="sm" variant="ghost" onClick={() => promptDocument && void navigator.clipboard.writeText(promptDocument.content)}><Copy />Copy prompt</Button>
         <Button size="sm" variant="ghost" onClick={() => promptDocument && downloadText(promptDocument.filename, promptDocument.content)}><Download />Download prompt</Button>
+        <Button size="sm" variant="ghost" onClick={() => h3PromptDocument && void navigator.clipboard.writeText(h3PromptDocument.content)}><Copy />Copy H3</Button>
+        <Button size="sm" variant="ghost" onClick={() => h3PromptDocument && downloadText(h3PromptDocument.filename, h3PromptDocument.content)}><Download />Download H3</Button>
       </div>
     </section>
   );
@@ -496,7 +529,7 @@ function ProductionReadinessCard({ project, onAction }: { project: StudioProject
 
 function DialogueCard({ project, sequence }: { project: StudioProject; sequence: StudioSequence }) {
   const plan = project.production.sequencePlans[sequence.id];
-  return <section className="mt-4 rounded-2xl border border-border bg-card/65 p-4"><div className="flex items-center justify-between gap-3"><div className="flex items-center gap-2"><Clapperboard className="size-4 text-amber-300" /><p className="text-sm font-medium">Dialogue & Seedance speaker lock</p></div><Badge variant="outline">{plan.dialogue.length ? `${plan.dialogue.length} bound` : 'No dialogue'}</Badge></div><p className="mt-2 text-[10px] leading-5 text-muted-foreground">Continuity Studio stores exact text, timing, speaker identity, current appearance, action, listeners, and reactions. Seedance generates the spoken result inside the video; no separate sound asset is created.</p><div className="mt-4 space-y-2">{plan.dialogue.length ? plan.dialogue.map((line) => <div key={line.id} className="rounded-xl bg-background/55 p-3"><div className="flex items-center justify-between gap-3 text-xs"><span className="font-medium">Turn {line.turnOrder} · Asset {assetNumber(line.speakerAssetNumber)} · {line.speakerName}</span><span className="tabular-nums text-muted-foreground">{line.startSecond}–{line.endSecond}s</span></div><p className="mt-2 text-sm">“{line.exactDialogue}”</p><p className="mt-2 text-[10px] leading-5 text-muted-foreground">{line.language} · {line.dialect} · {line.emotion} · {line.expression} · {line.physicalAction}</p><p className="mt-1 font-mono text-[9px] leading-4 text-muted-foreground">References: {line.requiredVisualReferences.map((reference) => reference.assetNumber ? `Asset ${assetNumber(reference.assetNumber)}` : reference.fileName).join(', ')}</p></div>) : <p className="text-xs text-muted-foreground">No spoken dialogue is authored. Seedance may generate only the scenario’s ambience, effects, requested music, and intentional silence.</p>}</div></section>;
+  return <section className="mt-4 rounded-2xl border border-border bg-card/65 p-4"><div className="flex items-center justify-between gap-3"><div className="flex items-center gap-2"><Clapperboard className="size-4 text-amber-300" /><p className="text-sm font-medium">Dialogue & provider speaker lock</p></div><Badge variant="outline">{plan.dialogue.length ? `${plan.dialogue.length} bound` : 'No dialogue'}</Badge></div><p className="mt-2 text-[10px] leading-5 text-muted-foreground">Continuity Studio stores exact text, timing, speaker identity, current appearance, action, listeners, and reactions. A verified MiniMax H3 or Seedance mode generates the spoken result inside the video; no separate sound asset is created.</p><div className="mt-4 space-y-2">{plan.dialogue.length ? plan.dialogue.map((line) => <div key={line.id} className="rounded-xl bg-background/55 p-3"><div className="flex items-center justify-between gap-3 text-xs"><span className="font-medium">Turn {line.turnOrder} · Asset {assetNumber(line.speakerAssetNumber)} · {line.speakerName}</span><span className="tabular-nums text-muted-foreground">{line.startSecond}–{line.endSecond}s</span></div><p className="mt-2 text-sm">“{line.exactDialogue}”</p><p className="mt-2 text-[10px] leading-5 text-muted-foreground">{line.language} · {line.dialect} · {line.emotion} · {line.expression} · {line.physicalAction}</p><p className="mt-1 font-mono text-[9px] leading-4 text-muted-foreground">References: {line.requiredVisualReferences.map((reference) => reference.assetNumber ? `Asset ${assetNumber(reference.assetNumber)}` : reference.fileName).join(', ')}</p></div>) : <p className="text-xs text-muted-foreground">No spoken dialogue is authored. The selected verified audiovisual provider may generate only the scenario’s ambience, effects, requested music, and intentional silence.</p>}</div></section>;
 }
 
 function ValidationCard({ project, sequence, onAction }: { project: StudioProject; sequence: StudioSequence; onAction: (message: string) => void }) {
@@ -549,7 +582,8 @@ function requestedDocumentAction(instruction: string): { action: 'copy' | 'downl
   const action = /^(?:please\s+)?copy\b/.test(lower) ? 'copy' : /^(?:please\s+)?download\b/.test(lower) ? 'download' : null;
   if (!action) return null;
   const sequenceNumber = Number(lower.match(/(?:sequence|seq)[\s_-]*0*(\d+)/)?.[1] ?? 0) || undefined;
-  const kind: ProductionDocumentKind | null = /seedance|prompt/.test(lower) ? 'seedance-prompt'
+  const kind: ProductionDocumentKind | null = /(?:minimax\s+)?h3/.test(lower) && /prompt/.test(lower) ? 'h3-prompt'
+    : /seedance|prompt/.test(lower) ? 'seedance-prompt'
     : /world\s+bible/.test(lower) ? 'world-bible'
       : /film\s+bible/.test(lower) ? 'film-bible'
         : /scenario/.test(lower) ? 'scenario'
@@ -576,6 +610,7 @@ function MessageItem({ item, project, onAction, onEdit, onRequestFiles, onOpenLi
           {item.metadata?.kind === 'script' && sequence && <ProductionDocumentCard project={project} kind="script" sequenceNumber={sequence.number} onAction={onAction} onEdit={onEdit} />}
           {item.metadata?.kind === 'scenario' && sequence && <ProductionDocumentCard project={project} kind="scenario" sequenceNumber={sequence.number} onAction={onAction} onEdit={onEdit} />}
           {item.metadata?.kind === 'prompt' && sequence && <ProductionDocumentCard project={project} kind="seedance-prompt" sequenceNumber={sequence.number} onAction={onAction} onEdit={onEdit} />}
+          {item.metadata?.kind === 'h3-prompt' && sequence && <ProductionDocumentCard project={project} kind="h3-prompt" sequenceNumber={sequence.number} onAction={onAction} onEdit={onEdit} />}
           {item.metadata?.kind === 'approval' && <ApprovalModeCard project={project} onAction={onAction} />}
           {item.metadata?.kind === 'asset-generation' && <AssetGenerationCard project={project} assetIds={item.metadata.assetIds} onAction={onAction} onRequestFiles={onRequestFiles} />}
           {item.metadata?.kind === 'assets' && <AssetsCard project={project} ids={item.metadata.assetIds} onAction={onAction} onOpenLibrary={onOpenLibrary} />}
@@ -610,12 +645,14 @@ export function StudioApp() {
   const [search, setSearch] = useState('');
   const [assetFilter, setAssetFilter] = useState('All');
   const [lightMode, setLightMode] = useState(false);
-  const [capabilities, setCapabilities] = useState<RuntimeCapabilities>({ imageGeneration: false, codexBrain: 'fallback' });
+  const [capabilities, setCapabilities] = useState<RuntimeCapabilities>({ imageGeneration: false, codexBrain: 'fallback', localRuntime: 'checking' });
+  const [localRuntime, setLocalRuntime] = useState<LocalRuntimeStatus | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const importInputRef = useRef<HTMLInputElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const syncedRuntimeJobsRef = useRef(new Set<string>());
 
   const startNewMovie = useCallback(() => {
     setProject(null);
@@ -692,6 +729,33 @@ export function StudioApp() {
     }
   }, []);
 
+  const refreshLocalRuntime = useCallback(async (deep = false) => {
+    if (!canReachLocalCodexHost()) {
+      setCapabilities((current) => ({ ...current, localRuntime: 'offline' }));
+      setLocalRuntime(null);
+      return null;
+    }
+    try {
+      const response = await fetch(`http://127.0.0.1:4318/v1/status${deep ? '?deep=true' : ''}`, { cache: 'no-store' });
+      const status = await response.json() as LocalRuntimeStatus & { error?: string };
+      if (!response.ok) throw new Error(status.error || 'Local runtime is unavailable.');
+      setLocalRuntime((current) => !deep && current ? {
+        ...status,
+        workflows: status.workflows.map((workflow) => {
+          const previous = current.workflows.find((item) => item.id === workflow.id);
+          return previous ? { ...workflow, compatible: previous.compatible, storyboardCompatible: previous.storyboardCompatible, h3Compatible: previous.h3Compatible, findings: previous.findings } : workflow;
+        }),
+      } : status);
+      const blocked = !status.engine.connected || status.components.some((item) => item.required !== false && !item.installed) || status.models.some((item) => item.required !== false && item.status !== 'Present') || status.workflows.some((workflow) => workflow.compatible === false);
+      setCapabilities((current) => ({ ...current, localRuntime: blocked ? 'blocked' : 'ready' }));
+      return status;
+    } catch {
+      setLocalRuntime(null);
+      setCapabilities((current) => ({ ...current, localRuntime: 'offline' }));
+      return null;
+    }
+  }, []);
+
   useEffect(() => {
     void (async () => {
       try {
@@ -708,6 +772,16 @@ export function StudioApp() {
       }
     })();
   }, [loadProject]);
+
+  useEffect(() => {
+    if (!canReachLocalCodexHost()) {
+      void Promise.resolve().then(() => setCapabilities((current) => ({ ...current, localRuntime: 'offline' })));
+      return;
+    }
+    const initial = window.setTimeout(() => void refreshLocalRuntime(true), 0);
+    const timer = window.setInterval(() => void refreshLocalRuntime(), 5000);
+    return () => { window.clearTimeout(initial); window.clearInterval(timer); };
+  }, [refreshLocalRuntime]);
 
   useEffect(() => {
     if (!canReachLocalCodexHost()) return;
@@ -873,12 +947,17 @@ export function StudioApp() {
       }
       if (data.sideEffect === 'export') window.setTimeout(() => downloadExport(finalProject.id), 300);
       if (data.sideEffect === 'asset-export') window.setTimeout(() => void downloadAssets(finalProject.id), 300);
+      if (data.sideEffect === 'local-generation') {
+        setView('workspace');
+        const runtime = await refreshLocalRuntime(true);
+        if (!runtime?.engine.connected) setNotice('The production request is safely queued. Open Local AI Engine to install or start the verified backend before GPU execution.');
+      }
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'The instruction could not be applied.');
     } finally {
       setWorking(false);
     }
-  }, [downloadAssets, downloadExport, project, projects, uploadFiles, working]);
+  }, [downloadAssets, downloadExport, project, projects, refreshLocalRuntime, uploadFiles, working]);
 
   const onSubmit = (event: { preventDefault: () => void }) => {
     event.preventDefault();
@@ -906,7 +985,7 @@ export function StudioApp() {
 
   const addComposerFiles = useCallback((incoming: File[]) => {
     const accepted = incoming.filter((file) => !file.type.startsWith('audio/'));
-    if (accepted.length !== incoming.length) setError('Audio files are not accepted. Seedance handles dialogue and sound inside generated video.');
+    if (accepted.length !== incoming.length) setError('Separate audio assets are not accepted. A verified MiniMax H3 or Seedance mode handles authored dialogue and sound inside generated video.');
     setFiles((current) => [...current, ...accepted]);
   }, []);
 
@@ -932,6 +1011,27 @@ export function StudioApp() {
     setProjects(data.projects ?? projects);
   };
 
+  useEffect(() => {
+    if (!project || !localRuntime) return;
+    const terminal = new Set(['Needs Review', 'Approved', 'Failed', 'Paused', 'Cancelled', 'Rejected']);
+    const runtimeJob = localRuntime.jobs.find((item) => item.projectId === project.id && terminal.has(item.status) && !syncedRuntimeJobsRef.current.has(`${item.id}:${item.status}`));
+    if (!runtimeJob) return;
+    const syncKey = `${runtimeJob.id}:${runtimeJob.status}`;
+    syncedRuntimeJobsRef.current.add(syncKey);
+    void fetch('/api/studio', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ projectId: project.id, expectedRevision: project.storageRevision, action: 'runtime-sync', runtimeJob }),
+    }).then(async (response) => {
+      const data = await response.json() as { project?: StudioProject; projects?: ProjectSummary[]; error?: string };
+      if (!response.ok || !data.project) throw new Error(data.error || 'The completed local runtime result could not be synchronized.');
+      setProject(data.project);
+      setProjects(data.projects ?? []);
+    }).catch((cause) => {
+      syncedRuntimeJobsRef.current.delete(syncKey);
+      setError(cause instanceof Error ? cause.message : 'The completed local runtime result could not be synchronized.');
+    });
+  }, [localRuntime, project]);
+
   const cleanupStorage = useCallback(async () => {
     if (!project) return;
     setWorking(true);
@@ -947,6 +1047,158 @@ export function StudioApp() {
       setWorking(false);
     }
   }, [project]);
+
+  const runtimeAction = useCallback(async (action: string, path = '/v1/engine', extra: Record<string, unknown> = {}) => {
+    setWorking(true);
+    setError('');
+    try {
+      const response = await fetch(`http://127.0.0.1:4318${path}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action, ...extra }) });
+      const data = await response.json() as { error?: string; message?: string };
+      if (!response.ok) throw new Error(data.error || 'The local runtime action failed.');
+      setNotice(data.message || 'Local runtime action accepted.');
+      await refreshLocalRuntime(true);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'The local runtime action failed.');
+    } finally {
+      setWorking(false);
+    }
+  }, [refreshLocalRuntime]);
+
+  const installMissingComponents = useCallback(async () => {
+    const missing = localRuntime?.components.filter((component) => !component.installed && ['engine', 'custom-node'].includes(component.kind ?? '')) ?? [];
+    if (!missing.length) return;
+    setError('');
+    for (const component of missing) {
+      try {
+        const response = await fetch('http://127.0.0.1:4318/v1/components', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'install', id: component.id }) });
+        const data = await response.json() as { error?: string };
+        if (!response.ok) throw new Error(data.error || `Could not install ${component.name}.`);
+      } catch (cause) {
+        setError(cause instanceof Error ? cause.message : `Could not install ${component.name}.`);
+        break;
+      }
+    }
+    await refreshLocalRuntime(true);
+  }, [localRuntime, refreshLocalRuntime]);
+
+  const submitPreparedLocalJob = useCallback(async (jobId: string) => {
+    if (!project) return;
+    const job = project.localProduction.queue.find((item) => item.id === jobId);
+    if (!job) return;
+    const workspace = project.localProduction.sequenceWorkspaces[job.sequenceId];
+    const translation = workspace.translations.find((item) => item.provider === 'MiniMax H3');
+    if (!translation) return;
+    setWorking(true);
+    setError('');
+    try {
+      const plan = JSON.stringify({
+        prompt_prefix: [],
+        shots: [{ id: `sequence_${String(job.sequenceNumber).padStart(3, '0')}`, prompt: translation.compiledPrompt.split('\n'), duration_seconds: job.durationSeconds, steps: job.steps, seed: String(job.seed), width: workspace.width, height: workspace.height, sampler: workspace.sampler, scheduler: workspace.scheduler, loras: workspace.loras, context_length: workspace.contextFrames, audio_context_length: workspace.audioContextFrames }],
+      });
+      const latestStoryboardJob = localRuntime?.jobs.findLast((runtimeJob) => runtimeJob.projectId === project.id && runtimeJob.target === 'storyboard' && ['Needs Review', 'Approved'].includes(runtimeJob.status) && Boolean(runtimeJob.output?.length));
+      const response = await fetch('http://127.0.0.1:4318/v1/jobs', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({
+          projectId: project.id, sequenceId: job.sequenceId, sequenceNumber: job.sequenceNumber, target: 'h3-chain', workflowId: job.workflowId,
+          studioJobId: job.id, candidateId: job.candidateId,
+          model: job.modelId, resolution: job.resolution, durationSeconds: job.durationSeconds, seed: job.seed, steps: job.steps, sampler: workspace.sampler, scheduler: workspace.scheduler, loras: workspace.loras,
+          mode: workspace.h3Mode,
+          references: translation.referenceMapping.map((mapping) => {
+            const stable = project.localProduction.references.find((reference) => reference.id === mapping.stableReferenceId);
+            const attachmentId = stable?.previewAttachmentId;
+            return {
+              ...mapping,
+              sourceUrl: attachmentId ? `${window.location.origin}/api/files?projectId=${encodeURIComponent(project.id)}&referenceId=${encodeURIComponent(attachmentId)}` : undefined,
+              runtimeJobId: mapping.stableTag === '@storyboard' ? latestStoryboardJob?.id : undefined,
+              outputIndex: mapping.stableTag === '@storyboard' ? 0 : undefined,
+            };
+          }), estimatedVramGb: job.estimatedVramGb,
+          bindings: {
+            'h3-model': 'MiniMax-H3-Ref2VA-pruned_int8_convrot.safetensors',
+            'h3-reference-compiler': translation.compiledPrompt,
+            'h3-plan': plan,
+            'h3-run-name': `${project.title}_SEQUENCE_${String(job.sequenceNumber).padStart(3, '0')}`,
+            'h3-context-length': workspace.contextFrames,
+            'h3-audio-mode': workspace.audioContextFrames > 0 ? 'enabled' : 'disabled',
+            'h3-scene-range': `${job.sequenceNumber}-${job.sequenceNumber}`,
+            'h3-resume-scene': job.sequenceNumber,
+            'h3-output-name': `${project.title}_SEQUENCE_${String(job.sequenceNumber).padStart(3, '0')}`,
+            'h3-candidate-count': workspace.candidateCount,
+          },
+        }),
+      });
+      const data = await response.json() as { error?: string };
+      if (!response.ok) throw new Error(data.error || 'The local job failed preflight.');
+      setNotice(`Sequence ${job.sequenceNumber} passed runtime preflight and entered the local GPU queue.`);
+      await refreshLocalRuntime(true);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'The local job failed preflight.');
+    } finally {
+      setWorking(false);
+    }
+  }, [localRuntime, project, refreshLocalRuntime]);
+
+  const submitStoryboardJob = useCallback(async () => {
+    if (!project) return;
+    const board = project.localProduction.storyboards[0];
+    const identity = project.localProduction.references.find((reference) => reference.stableTag === '@hero_face' && reference.previewAttachmentId)
+      ?? project.localProduction.references.find((reference) => reference.stableTag === '@hero' && reference.previewAttachmentId);
+    if (!board || !identity?.previewAttachmentId) {
+      setError('Upload and bind the main character identity image before running the Krea storyboard.');
+      return;
+    }
+    setWorking(true);
+    setError('');
+    try {
+      const rows = Math.ceil(board.panelCount / board.columns);
+      const shots = JSON.stringify({
+        shots: board.panels.map((panel, index) => ({ prompt: panel.prompt, preview: `${project.id}_storyboard_${index + 1}.png` })),
+        selected: Math.max(0, board.panels.findIndex((panel) => panel.approvalState === 'Needs Review')),
+      });
+      const response = await fetch('http://127.0.0.1:4318/v1/jobs', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({
+          projectId: project.id, sequenceId: board.id, sequenceNumber: 0, target: 'storyboard', workflowId: board.workflowId,
+          model: 'Krea 2', seed: board.panels[0]?.seed ?? 1, steps: 12, references: [{
+            stableReferenceId: identity.id, stableTag: identity.stableTag, kind: identity.kind,
+            sourceIdentifier: identity.sourceIdentifier,
+            sourceUrl: `${window.location.origin}/api/files?projectId=${encodeURIComponent(project.id)}&referenceId=${encodeURIComponent(identity.previewAttachmentId)}`,
+          }],
+          bindings: {
+            'storyboard-shots': shots,
+            'storyboard-regenerate-shot': 0,
+            'storyboard-layout-columns': board.columns,
+            'storyboard-layout-rows': rows,
+            'storyboard-labels': board.panels.map((panel) => panel.label).join(', '),
+          },
+        }),
+      });
+      const data = await response.json() as { error?: string };
+      if (!response.ok) throw new Error(data.error || 'The storyboard job failed preflight.');
+      setNotice(`${board.panelCount}-panel Krea storyboard entered the local GPU queue and will stop for review.`);
+      await refreshLocalRuntime(true);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'The storyboard job failed preflight.');
+    } finally {
+      setWorking(false);
+    }
+  }, [project, refreshLocalRuntime]);
+
+  const localRuntimeJobAction = useCallback(async (runtimeJobId: string, action: 'approve' | 'reject' | 'pause' | 'cancel' | 'retry' | 'resume') => {
+    setWorking(true);
+    setError('');
+    try {
+      const response = await fetch(`http://127.0.0.1:4318/v1/jobs/${encodeURIComponent(runtimeJobId)}/actions`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action }),
+      });
+      const data = await response.json() as { error?: string };
+      if (!response.ok) throw new Error(data.error || `The local ${action} action failed.`);
+      setNotice(`Local job ${action} action accepted at a recoverable boundary.`);
+      await refreshLocalRuntime(true);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : `The local ${action} action failed.`);
+    } finally {
+      setWorking(false);
+    }
+  }, [refreshLocalRuntime]);
 
   const filteredProjects = useMemo(() => projects.filter((item) => item.title.toLowerCase().includes(search.toLowerCase())), [projects, search]);
   const filteredAssets = useMemo(() => {
@@ -1008,8 +1260,12 @@ export function StudioApp() {
           <ChatView project={project} messages={messages} working={working} error={error} onAction={onAction} onEdit={editDocument} onRequestFiles={() => { setDraft('Use these as my main character references.'); fileInputRef.current?.click(); }} onOpenLibrary={() => setView('assets')} onExport={() => downloadExport()} onAssetExport={() => void downloadAssets()} endRef={messagesEndRef} />
         ) : view === 'projects' ? (
           <ProjectsView projects={filteredProjects} search={search} setSearch={setSearch} searchRef={searchRef} onOpen={loadProject} onNew={startNewMovie} onImport={() => importInputRef.current?.click()} />
+        ) : view === 'workspace' ? (
+          <MovieWorkspaceView project={project} runtime={localRuntime} working={working} onAction={onAction} onRunJob={(jobId) => void submitPreparedLocalJob(jobId)} onRuntimeJobAction={(jobId, action) => void localRuntimeJobAction(jobId, action)} onRunStoryboard={() => void submitStoryboardJob()} onOpenEngine={() => setView('engine')} onNew={startNewMovie} />
         ) : view === 'assets' ? (
           <AssetsView project={project} assets={filteredAssets} filter={assetFilter} setFilter={setAssetFilter} onAction={onAction} onAssetExport={() => void downloadAssets()} onNew={startNewMovie} />
+        ) : view === 'engine' ? (
+          <LocalEngineView status={localRuntime} capability={capabilities.localRuntime} working={working} onAction={(action) => void runtimeAction(action)} onRefresh={() => void refreshLocalRuntime(true)} onInstall={() => void installMissingComponents()} onVerifyModels={() => void runtimeAction('verify', '/v1/models')} onNew={startNewMovie} />
         ) : view === 'exports' ? (
           <ExportsView project={project} onExport={() => downloadExport()} onAssetExport={() => void downloadAssets()} onNew={startNewMovie} />
         ) : view === 'advanced' ? (
@@ -1091,6 +1347,93 @@ function AssetsView({ project, assets, filter, setFilter, onAction, onAssetExpor
   </PageFrame>;
 }
 
+function MovieWorkspaceView({ project, runtime, working, onAction, onRunJob, onRuntimeJobAction, onRunStoryboard, onOpenEngine, onNew }: { project: StudioProject | null; runtime: LocalRuntimeStatus | null; working: boolean; onAction: (message: string) => void; onRunJob: (jobId: string) => void; onRuntimeJobAction: (jobId: string, action: 'approve' | 'reject' | 'pause' | 'cancel' | 'retry' | 'resume') => void; onRunStoryboard: () => void; onOpenEngine: () => void; onNew: () => void }) {
+  const [selectedSequence, setSelectedSequence] = useState(project?.localProduction.selectedSequenceNumber ?? 1);
+  const [selectedPanel, setSelectedPanel] = useState('A1');
+  if (!project) return <PageFrame eyebrow="Hidden production workspace" title="Movie Workspace" description="Storyboards, references, sequence candidates, review gates, and the local queue appear here after you start a movie."><EmptyCollection icon={Clapperboard} title="No active movie" text="Create or open a movie; chat remains the place where you direct it." action={<Button onClick={onNew}><Plus />Create a movie</Button>} /></PageFrame>;
+  const sequence = project.sequences.find((item) => item.number === selectedSequence) ?? project.sequences[0];
+  const workspace = project.localProduction.sequenceWorkspaces[sequence.id];
+  const board = project.localProduction.storyboards[0];
+  const panel = board?.panels.find((item) => item.label === selectedPanel) ?? board?.panels.find((item) => item.sequenceId === sequence.id) ?? board?.panels[0];
+  const activeReferences = project.localProduction.references.filter((reference) => workspace.activeReferenceIds.includes(reference.id));
+  const candidates = project.localProduction.candidates.filter((candidate) => candidate.sequenceId === sequence.id);
+  const reviewCandidateIndex = Math.max(1, candidates.findLastIndex((candidate) => ['Needs Review', 'Generated'].includes(candidate.status)) + 1);
+  const jobs = project.localProduction.queue.filter((job) => job.sequenceId === sequence.id);
+  const translation = workspace.translations.find((item) => item.provider === 'MiniMax H3');
+  const h3RuntimeReady = Boolean(runtime?.engine.connected && runtime.workflows.every((workflow) => workflow.h3Compatible === true));
+  const localModeExecutable = workspace.h3Mode === 'Ref2VA';
+  const storyboardRuntimeReady = Boolean(runtime?.engine.connected && runtime.workflows.every((workflow) => workflow.storyboardCompatible === true));
+  return <PageFrame eyebrow="Sequence production" title="Movie Workspace" description="Direct the movie here without touching raw ComfyUI. Stable Studio tags, numbered assets, provider translations, candidates, and handoffs remain attached to the project source of truth." action={<div className="flex gap-2"><Button variant="outline" onClick={onOpenEngine}><Network />Local AI Engine</Button><Button onClick={() => onAction(`Render Sequence ${sequence.number}`)}><Play />Render sequence</Button></div>}>
+    <section className="overflow-hidden rounded-xl border border-border bg-card/55">
+      <div className="flex overflow-x-auto">{project.sequences.map((item) => {
+        const sequenceJobs = project.localProduction.queue.filter((job) => job.sequenceId === item.id);
+        const latest = sequenceJobs.at(-1);
+        const displayStatus = latest?.status ?? item.status;
+        return <button key={item.id} type="button" onClick={() => setSelectedSequence(item.number)} className={cn('min-w-28 border-r border-border px-3 py-3 text-left transition hover:bg-secondary/70', item.number === sequence.number && 'border-b-2 border-b-amber-300 bg-secondary')}><span className={cn('text-[9px] font-semibold uppercase tracking-[0.12em]', statusClass(displayStatus))}>{String(item.number).padStart(2, '0')} · {displayStatus}</span><p className="mt-1 truncate text-xs">{item.title}</p></button>;
+      })}</div>
+    </section>
+    <div className="mt-4 grid gap-4 xl:grid-cols-[minmax(0,1fr)_320px]">
+      <div className="min-w-0 space-y-4">
+        <section className="rounded-2xl border border-border bg-card/55 p-4 sm:p-5">
+          <div className="flex flex-wrap items-start justify-between gap-3"><div><p className="eyebrow">Sequence {String(sequence.number).padStart(2, '0')}</p><h2 className="mt-2 text-xl font-medium tracking-[-0.03em]">{sequence.title}</h2><p className="mt-2 text-xs leading-5 text-muted-foreground">{sequence.purpose}</p></div><div className="flex gap-2"><Badge variant="outline">{workspace.selectedProvider}</Badge><Badge variant="outline" className={workspace.h3Mode === 'Ref2VA' ? 'border-amber-400/30 text-amber-200' : ''}>{workspace.h3Mode}</Badge></div></div>
+          <div className="mt-4 aspect-video overflow-hidden rounded-xl border border-border bg-[radial-gradient(circle_at_50%_30%,oklch(.72_.16_64/.08),transparent_55%),oklch(.12_.01_255)]">
+            {candidates.findLast((candidate) => candidate.mediaPath)?.mediaPath ? <video controls className="size-full object-contain" src={candidates.findLast((candidate) => candidate.mediaPath)?.mediaPath ?? undefined}><track kind="captions" src="data:text/vtt,WEBVTT%0A%0A" srcLang="en" label="Captions unavailable" default /></video> : <div className="grid size-full place-items-center px-6 text-center"><div><span className="mx-auto grid size-12 place-items-center rounded-full border border-border bg-background/70 text-muted-foreground"><Film className="size-5" /></span><p className="mt-4 text-sm font-medium">No finished candidate attached</p><p className="mt-2 max-w-sm text-xs leading-5 text-muted-foreground">{h3RuntimeReady && localModeExecutable ? 'Run the prepared immutable job, then the result will stop at the Review Gate.' : !localModeExecutable ? `${workspace.h3Mode} is compiled for export, but this runtime currently executes only the validated Ref2VA graph.` : 'The plan is safe. Resolve the Local AI Engine blockers before GPU execution.'}</p></div></div>}
+          </div>
+          <div className="mt-3 flex flex-wrap gap-2"><Button size="sm" disabled={!candidates.some((candidate) => ['Needs Review', 'Generated'].includes(candidate.status))} onClick={() => onAction(`Use candidate ${reviewCandidateIndex} for Sequence ${sequence.number}`)}><Check />Approve</Button><Button size="sm" variant="outline" onClick={() => onAction(`Edit and retry Sequence ${sequence.number}: `)}><Pencil />Edit and Retry</Button><Button size="sm" variant="outline" onClick={() => onAction(`Generate another candidate for Sequence ${sequence.number}`)}><RefreshCw />Another Candidate</Button><Button size="sm" variant="outline" disabled={!candidates.some((candidate) => ['Needs Review', 'Generated'].includes(candidate.status))} onClick={() => onAction(`Approve candidate ${reviewCandidateIndex} for Sequence ${sequence.number} and stop`)}><ShieldCheck />Approve & stop</Button><Button size="sm" variant="ghost" onClick={() => onAction(`Reject current candidate for Sequence ${sequence.number}`)}><X />Reject</Button></div>
+          {candidates.length > 0 && <div className="mt-4 grid gap-2 sm:grid-cols-2">{candidates.map((candidate, index) => { const reviewable = Boolean(candidate.mediaPath && ['Needs Review', 'Generated'].includes(candidate.status)); return <div key={candidate.id} className={cn('rounded-xl border p-3', candidate.status === 'Approved' ? 'border-emerald-400/25 bg-emerald-400/5' : 'border-border bg-background/45')}><div className="flex items-center justify-between gap-2"><p className="text-xs font-medium">Candidate {index + 1}</p><Badge variant="outline" className={statusClass(candidate.status)}>{candidate.status}</Badge></div>{candidate.mediaPath ? <video controls preload="metadata" className="mt-3 aspect-video w-full rounded-lg bg-black object-contain" src={candidate.mediaPath}><track kind="captions" src="data:text/vtt,WEBVTT%0A%0A" srcLang="en" label="Captions unavailable" default /></video> : <div className="mt-3 grid aspect-video place-items-center rounded-lg bg-background text-[10px] text-muted-foreground">Awaiting output</div>}<div className="mt-2 flex items-center justify-between text-[9px] text-muted-foreground"><span>Seed {candidate.seed}</span><button type="button" disabled={!reviewable} className="text-amber-200 hover:underline disabled:cursor-not-allowed disabled:text-muted-foreground disabled:no-underline" onClick={() => onAction(`Use candidate ${index + 1} for Sequence ${sequence.number}`)}>Select</button></div></div>; })}</div>}
+        </section>
+        <section className="rounded-2xl border border-border bg-card/55 p-4 sm:p-5">
+          <div className="flex items-center justify-between gap-3"><div><p className="eyebrow">Master storyboard</p><h2 className="mt-2 text-sm font-medium">{board?.name ?? 'Storyboard not generated'}</h2></div><div className="flex gap-2"><Badge variant="outline" className={statusClass(board?.approvalState ?? 'Draft')}>{board?.approvalState ?? 'Draft'}</Badge><Button size="sm" variant="outline" disabled={working || !storyboardRuntimeReady} onClick={onRunStoryboard}><Sparkles />Run Krea board</Button></div></div>
+          {board?.generatedCompositeFile && <object data={board.generatedCompositeFile} type="image/png" aria-label={`${board.name} generated composite`} className="mt-4 h-[34rem] w-full rounded-xl border border-border bg-black object-contain" />}
+          {board ? <div className="mt-4 grid grid-cols-4 gap-2 sm:grid-cols-6 lg:grid-cols-8">{board.panels.map((item) => <button key={item.id} type="button" onClick={() => { setSelectedPanel(item.label); if (item.sequenceNumber) setSelectedSequence(item.sequenceNumber); }} className={cn('aspect-video rounded-lg border p-1.5 text-left text-[9px] font-semibold transition hover:border-amber-300/35', item.label === panel?.label ? 'border-amber-300 bg-amber-300/10 text-amber-100' : item.approvalState === 'Approved' ? 'border-emerald-400/20 bg-emerald-400/5 text-emerald-200' : item.approvalState === 'Needs Review' ? 'border-rose-400/25 bg-rose-400/5 text-rose-200' : 'border-border bg-background/55 text-muted-foreground')}><span>{item.label}</span><span className="mt-1 block truncate font-normal">S{item.sequenceNumber ?? '—'}</span></button>)}</div> : <p className="mt-4 text-xs text-muted-foreground">Ask Studio to generate a storyboard. Custom boards may contain more than 16 panels.</p>}
+          {panel && <div className="mt-4 rounded-xl border border-border bg-background/45 p-3"><div className="flex items-start justify-between gap-3"><div><p className="text-xs font-medium">Panel {panel.label} · V{String(panel.version).padStart(2, '0')}</p><p className="mt-2 text-xs leading-5 text-muted-foreground">{panel.prompt}</p></div><Button size="sm" variant="outline" onClick={() => onAction(`Regenerate only ${panel.label}`)}><RefreshCw />Regenerate only {panel.label}</Button></div></div>}
+        </section>
+        <details className="rounded-2xl border border-border bg-card/55 p-4"><summary className="cursor-pointer text-sm font-medium">Official MiniMax H3 prompt · {workspace.h3Mode}</summary><pre className="mt-4 max-h-96 overflow-auto whitespace-pre-wrap rounded-xl bg-background/55 p-4 text-[11px] leading-5 text-foreground/80">{translation?.compiledPrompt}</pre></details>
+        <details className="rounded-2xl border border-border bg-card/55 p-4"><summary className="cursor-pointer text-sm font-medium">Advanced generation controls</summary><div className="mt-4 grid grid-cols-2 gap-2 text-xs sm:grid-cols-4"><StateBlock label="Resolution" value={`${workspace.width}×${workspace.height}`} /><StateBlock label="Seed / steps" value={`${workspace.seed} / ${workspace.steps}`} /><StateBlock label="Sampler" value={`${workspace.sampler} · ${workspace.scheduler}`} /><StateBlock label="Context" value={`${workspace.contextFrames} video · ${workspace.audioContextFrames} audio`} /><StateBlock label="Candidates" value={String(workspace.candidateCount)} /><StateBlock label="LoRAs" value={workspace.loras.length ? workspace.loras.map((lora) => `${lora.id}@${lora.strength}`).join(', ') : 'None'} /><StateBlock label="Continuation" value={workspace.continuationMode} /><StateBlock label="Workflow" value={project.localProduction.workflowPin.version} /></div><div className="mt-4 flex flex-wrap gap-2">{(['T2VA', 'I2VA', 'FL2VA', 'L2VA', 'Ref2VA'] as const).map((mode) => <Button key={mode} size="sm" variant={workspace.h3Mode === mode ? 'default' : 'outline'} onClick={() => onAction(`Use H3 ${mode} for Sequence ${sequence.number}`)}>{mode}</Button>)}<Button size="sm" variant="outline" onClick={() => onAction(`Set context length to 22 and audio context to 22 for Sequence ${sequence.number}`)}>22-frame preset</Button><Button size="sm" variant="outline" onClick={() => onAction(`Set resolution to 1920x1080 for Sequence ${sequence.number}`)}>1080p</Button><Button size="sm" variant="outline" onClick={() => onAction(`Set candidate count to 2 for Sequence ${sequence.number}`)}>2 candidates</Button></div><p className="mt-3 text-[10px] leading-4 text-muted-foreground">Seeds, steps, resolution, sampler, scheduler, LoRAs, context, audio context, continuation mode, and candidate count are stored per sequence and frozen into each generation snapshot. Set any exact value through chat.</p></details>
+      </div>
+      <aside className="space-y-4">
+        <section className="rounded-2xl border border-border bg-card/55 p-4"><div className="flex items-center justify-between"><h2 className="text-sm font-medium">Stable references</h2><Badge variant="outline">{activeReferences.length} active</Badge></div><div className="mt-3 grid grid-cols-2 gap-2">{activeReferences.slice(0, 8).map((reference) => <button key={reference.id} type="button" title={reference.sourceIdentifier} className="rounded-xl border border-border bg-background/50 p-3 text-left transition hover:border-sky-300/25"><ImageIcon className="size-4 text-muted-foreground" /><p className="mt-3 truncate font-mono text-[10px] text-sky-200">{reference.stableTag}</p><p className="mt-1 text-[9px] text-muted-foreground">{reference.role}</p></button>)}</div><p className="mt-3 text-[10px] leading-4 text-muted-foreground">Native Picture/Video numbers are generated only inside each immutable snapshot.</p></section>
+        <section className="rounded-2xl border border-border bg-card/55 p-4"><div className="flex items-center justify-between"><h2 className="text-sm font-medium">Prepared queue</h2><Button size="sm" variant="ghost" onClick={() => onAction('Pause rendering')}>Pause planned</Button></div><div className="mt-3 space-y-2">{jobs.length ? jobs.map((job) => { const runtimeJob = runtime?.jobs.find((item) => item.studioJobId === job.id); const status = runtimeJob?.status ?? job.status; const progress = runtimeJob?.progress ?? job.progress; return <div key={job.id} className="rounded-xl border border-border bg-background/50 p-3"><div className="flex items-center justify-between gap-2"><span className="text-[10px] font-semibold uppercase">SEQ {String(job.sequenceNumber).padStart(2, '0')} · {status}</span><span className="font-mono text-[10px] text-sky-200">{progress}%</span></div><Progress value={progress} className="mt-2" /><div className="mt-2 grid grid-cols-2 gap-1 text-[9px] text-muted-foreground"><span>Seed {job.seed}</span><span>{job.modelId}</span><span>{job.resolution}</span><span>Retry {runtimeJob?.retryCount ?? job.retryCount}</span></div>{!runtimeJob ? <Button className="mt-3 w-full" size="sm" variant="outline" disabled={working || !h3RuntimeReady || !localModeExecutable} title={!localModeExecutable ? 'This local runtime currently executes the validated Ref2VA graph only.' : undefined} onClick={() => onRunJob(job.id)}><Play />Run verified job</Button> : ['Preparing', 'Waiting for GPU', 'Loading model', 'Generating', 'Decoding', 'Saving', 'Validating'].includes(runtimeJob.status) ? <div className="mt-3 grid grid-cols-2 gap-2"><Button size="sm" variant="outline" disabled={working} onClick={() => onRuntimeJobAction(runtimeJob.id, 'pause')}>Pause</Button><Button size="sm" variant="ghost" disabled={working} onClick={() => onRuntimeJobAction(runtimeJob.id, 'cancel')}>Cancel</Button></div> : ['Paused', 'Failed', 'Cancelled'].includes(runtimeJob.status) ? <Button className="mt-3 w-full" size="sm" variant="outline" disabled={working || !localModeExecutable} onClick={() => onRuntimeJobAction(runtimeJob.id, 'resume')}><RefreshCw />Resume verified snapshot</Button> : null}{(runtimeJob?.failure || job.failure) && <p className="mt-2 text-[10px] leading-4 text-rose-200">{runtimeJob?.failure || job.failure}</p>}</div>; }) : <p className="rounded-xl border border-dashed border-border p-4 text-xs leading-5 text-muted-foreground">No prepared jobs for this sequence. Say “Render Sequence {sequence.number}”.</p>}</div></section>
+        <section className="rounded-2xl border border-border bg-card/55 p-4"><h2 className="text-sm font-medium">Continuity handoff</h2><p className="mt-2 text-xs leading-5 text-muted-foreground">{sequence.number === 1 ? 'Independent opening uses the approved story state.' : `${workspace.continuationMode}. Consumes the previous approved video, context frames, audio context when supported, ending state, positions, wardrobe, objects, environment, motion, and screen direction.`}</p><Badge variant="outline" className="mt-3">{project.localProduction.handoffs.some((handoff) => handoff.sequenceNumber === sequence.number - 1) || sequence.number === 1 ? 'Available' : 'Awaiting previous approval'}</Badge></section>
+      </aside>
+    </div>
+  </PageFrame>;
+}
+
+function LocalEngineView({ status, capability, working, onAction, onRefresh, onInstall, onVerifyModels, onNew }: { status: LocalRuntimeStatus | null; capability: RuntimeCapabilities['localRuntime']; working: boolean; onAction: (action: string) => void; onRefresh: () => void; onInstall: () => void; onVerifyModels: () => void; onNew: () => void }) {
+  if (!canReachLocalCodexHost()) return <PageFrame eyebrow="Windows-first local renderer" title="Local AI Engine" description="The hosted Sites build cannot reach your machine. Open Continuity Studio on localhost to use your Codex session and local GPU without a separate Studio sign-in."><EmptyCollection icon={Network} title="Localhost required" text="Run npm run dev in the repository, then open http://localhost:3000." action={<Button onClick={onNew}><Plus />Return to chat</Button>} /></PageFrame>;
+  if (!status) return <PageFrame eyebrow="Windows-first local renderer" title="Local AI Engine" description="Continuity Studio is the interface; ComfyUI remains a hidden loopback execution backend." action={<Button variant="outline" onClick={onRefresh}><RefreshCw />Retry connection</Button>}><EmptyCollection icon={Network} title="Runtime manager offline" text="Start the Studio with npm run dev so the loopback runtime manager starts on 127.0.0.1:4318." /></PageFrame>;
+  const missingComponents = status.components.filter((item) => !item.installed);
+  const missingModels = status.models.filter((item) => !item.installed);
+  const blockingFindings = status.workflows.flatMap((workflow) => workflow.findings ?? []).filter((finding) => finding.severity === 'blocking');
+  const gpu = status.system.gpu.devices[0];
+  const gb = (bytes: number) => `${(bytes / 1024 / 1024 / 1024).toFixed(1)} GB`;
+  const readiness = [
+    ['ComfyUI', status.engine.connected ? 'Connected' : 'Not connected'],
+    ['MiniMax H3', status.models.some((model) => /h3/i.test(model.id) && model.installed) ? 'Installed' : 'Missing'],
+    ['H3 Ref2VA', status.models.some((model) => /ref2va/i.test(model.id) && model.installed) ? 'Installed' : 'Missing'],
+    ['H3 Contex Loop', status.components.some((component) => /context-loop/i.test(component.id) && component.installed) ? 'Ready' : 'Missing'],
+    ['Krea 2', status.models.some((model) => /krea2/i.test(model.id) && model.installed) ? 'Installed' : 'Missing'],
+    ['Krea Multi Shot', status.components.some((component) => /krea-multishot/i.test(component.id) && component.installed) ? 'Ready' : 'Missing'],
+    ['FFmpeg', status.system.ffmpeg.available ? 'Ready' : 'Missing'],
+    ['GPU', gpu ? `${gpu.name}${gpu.memoryTotalMb ? ` · ${(gpu.memoryTotalMb / 1024).toFixed(0)} GB` : ''}` : 'Not detected'],
+    ['Models', `${status.models.length - missingModels.length}/${status.models.length} present`],
+  ];
+  return <PageFrame eyebrow="Windows-first local renderer" title="Local AI Engine" description="Studio manages the pinned local production stack over loopback. It never reports a component ready until installation, model, workflow, and live schema checks agree." action={<div className="flex gap-2"><Badge variant="outline" className={statusClass(capability === 'ready' ? 'Ready' : capability === 'offline' ? 'Failed' : 'Blocked')}>{capability}</Badge><Button variant="outline" onClick={onRefresh}><RefreshCw />Refresh</Button></div>}>
+    <div className="grid gap-4 lg:grid-cols-3">
+      <section className="rounded-2xl border border-border bg-card/55 p-5 lg:col-span-2"><div className="flex items-start justify-between"><div><p className="eyebrow">Readiness</p><h2 className="mt-2 text-lg font-medium">Local production stack</h2></div><span className={cn('size-2 rounded-full', status.engine.connected ? 'bg-emerald-400' : 'bg-amber-400')} /></div><div className="mt-5 grid gap-x-8 gap-y-3 sm:grid-cols-2">{readiness.map(([label, value]) => <StatusLine key={label} label={label} value={value} />)}</div></section>
+      <section className="rounded-2xl border border-border bg-card/55 p-5"><p className="eyebrow">Machine</p><h2 className="mt-2 text-lg font-medium">{gpu?.name ?? 'No NVIDIA GPU detected'}</h2><div className="mt-4 space-y-2 text-xs text-muted-foreground"><StatusLine label="System RAM" value={gb(status.system.ram.totalBytes)} /><StatusLine label="Preset" value={status.system.preset?.name ?? status.system.preset?.id ?? 'Fallback'} /><StatusLine label="Python" value={status.system.python.available ? 'Ready' : 'Missing'} /><StatusLine label="FFmpeg" value={status.system.ffmpeg.available ? 'Ready' : 'Missing'} /></div></section>
+    </div>
+    <section className="mt-4 rounded-2xl border border-border bg-card/55 p-5"><div className="flex flex-wrap gap-2"><Button disabled={working || status.engine.connected} onClick={() => onAction('start')}><Play />Start Engine</Button><Button disabled={working || !status.engine.connected || !status.engine.managedByStudio} variant="outline" onClick={() => onAction('stop')}>Stop</Button><Button disabled={working} variant="outline" onClick={() => onAction('restart')}><RefreshCw />Restart</Button><Button disabled={working} variant="outline" onClick={() => onAction('test')}><Network />Test Connection</Button><Button disabled={working || !missingComponents.length} variant="outline" onClick={onInstall}><Download />Install Missing ({missingComponents.length})</Button><Button disabled={working || !status.models.some((model) => model.installed)} variant="outline" onClick={onVerifyModels}><ShieldCheck />Verify Models</Button><Button disabled={working} variant="outline" onClick={() => onAction('diagnostics')}><Settings />Run Diagnostics</Button><Button variant="ghost" onClick={() => window.open(status.configuration.comfyBaseUrl, '_blank', 'noopener,noreferrer')}>Open Advanced ComfyUI</Button></div><p className="mt-3 text-[10px] leading-4 text-muted-foreground">Install and update operations use only allowlisted repositories and pinned commits. Large model weights are never downloaded without an explicit model action.</p></section>
+    {blockingFindings.length > 0 && <section className="mt-4 rounded-2xl border border-rose-400/25 bg-rose-400/5 p-5"><p className="eyebrow text-rose-200">Blocking workflow findings</p><div className="mt-3 space-y-2">{blockingFindings.map((finding, index) => <p key={`${finding.message}:${index}`} className="text-xs leading-5 text-rose-100/85">{finding.message}</p>)}</div></section>}
+    <div className="mt-4 grid gap-4 xl:grid-cols-2">
+      <section className="rounded-2xl border border-border bg-card/55 p-5"><div className="flex items-center justify-between"><div><p className="eyebrow">Pinned components</p><h2 className="mt-2 font-medium">{status.components.length - missingComponents.length}/{status.components.length} installed</h2></div><Badge variant="outline">License-aware</Badge></div><div className="mt-4 max-h-80 space-y-2 overflow-auto">{status.components.map((component) => <div key={component.id} className="rounded-xl border border-border bg-background/45 p-3"><div className="flex items-center justify-between gap-3"><p className="truncate text-xs font-medium">{component.name}</p><Badge variant="outline" className={statusClass(component.status)}>{component.status}</Badge></div><p className="mt-2 truncate font-mono text-[9px] text-muted-foreground">{component.pinnedCommit ?? component.license ?? component.error ?? 'System component'}</p></div>)}</div></section>
+      <section className="rounded-2xl border border-border bg-card/55 p-5"><div className="flex items-center justify-between"><div><p className="eyebrow">Model manifest</p><h2 className="mt-2 font-medium">{status.models.length - missingModels.length}/{status.models.length} present</h2></div><Badge variant="outline">External weights</Badge></div><div className="mt-4 max-h-80 space-y-2 overflow-auto">{status.models.map((model) => <div key={model.id} className="rounded-xl border border-border bg-background/45 p-3"><div className="flex items-center justify-between gap-3"><p className="truncate text-xs font-medium">{model.name}</p><Badge variant="outline" className={statusClass(model.status)}>{model.status}</Badge></div><p className="mt-2 truncate font-mono text-[9px] text-muted-foreground">{model.path}</p></div>)}</div></section>
+    </div>
+    <details className="mt-4 rounded-xl border border-border px-4 py-3"><summary className="cursor-pointer text-sm font-medium">Advanced paths, operations, and backend versions</summary><div className="mt-4 grid gap-3 text-xs text-muted-foreground sm:grid-cols-2"><StatusLine label="Runtime" value={status.configuration.runtimeRoot} /><StatusLine label="ComfyUI" value={status.configuration.comfyRoot} /><StatusLine label="Manager" value={`v${status.version}`} /><StatusLine label="Operations" value={String(status.operations.length)} /></div></details>
+  </PageFrame>;
+}
+
 function ExportsView({ project, onExport, onAssetExport, onNew }: { project: StudioProject | null; onExport: () => void; onAssetExport: () => void; onNew: () => void }) {
   return <PageFrame eyebrow="Preserve the production" title="Exports" description="Download the complete project or one clean, flat, permanently numbered asset folder for your video generator.">
     {!project ? <EmptyCollection icon={Archive} title="No active movie" text="Open a movie before preparing its production package." action={<Button onClick={onNew}><Plus />Create a movie</Button>} /> : <div className="grid gap-4 lg:grid-cols-2">
@@ -1144,7 +1487,8 @@ function SettingsView({ project, capabilities, lightMode, setLightMode, onUpdate
     { title: 'Studio access', icon: Sparkles, description: capabilities.codexBrain === 'connected' ? 'Live Codex reasoning is connected through the local Codex app-server. It uses the Codex environment you already authorized; Continuity Studio has no separate sign-in.' : 'No Continuity Studio sign-in is required. Start the local Codex brain host to replace the deterministic fallback with live reasoning.', control: <Badge variant="outline" className={capabilities.codexBrain === 'connected' ? 'border-emerald-400/20 bg-emerald-400/10 text-emerald-200' : 'border-amber-400/20 bg-amber-400/10 text-amber-200'}>{capabilities.codexBrain === 'connected' ? 'Codex connected' : capabilities.codexBrain === 'checking' ? 'Checking Codex' : 'Fallback active'}</Badge> },
     { title: 'Approval behavior', icon: ShieldCheck, description: 'Choose how non-paid planning advances. Generation remains separately protected.', control: <select aria-label="Approval behavior" disabled={!project} value={project?.settings.approvalMode ?? 'automatic'} onChange={(event) => { const approvalMode = event.target.value as StudioProject['settings']['approvalMode']; onUpdate({ approvalMode, automaticMode: approvalMode === 'automatic', pipelineApprovalGranted: false }); }} className="h-9 rounded-lg border border-border bg-background px-3 text-xs outline-none"><option value="automatic">Automatic</option><option value="master">Master</option><option value="manual">Manual</option></select> },
     { title: 'Image Generation', icon: ImageIcon, description: capabilities.imageGeneration ? 'OpenAI GPT Image is available for explicit composite-sheet requests. References are sent only after that request.' : 'No server-side image provider key is configured. Prompts and references remain safe.', control: <Badge variant="outline" className={capabilities.imageGeneration ? 'border-emerald-400/20 bg-emerald-400/10 text-emerald-200' : ''}>{capabilities.imageGeneration ? 'GPT Image ready' : 'Not connected'}</Badge> },
-    { title: 'Video Generation', icon: Film, description: 'Provider-neutral Seedance packages include dialogue and sound. Video begins only after an explicit Generate command and a paid-attempt confirmation.', control: <Badge variant="outline" className="border-amber-400/20 bg-amber-400/10 text-amber-200">Explicit only</Badge> },
+    { title: 'Local AI Engine', icon: Network, description: 'ComfyUI, Krea 2, MiniMax H3, Ref2VA, Contex Loop, and FFmpeg run behind Studio on localhost. Readiness is validated, never assumed.', control: <Badge variant="outline" className={statusClass(capabilities.localRuntime === 'ready' ? 'Ready' : capabilities.localRuntime === 'offline' ? 'Failed' : 'Blocked')}>{capabilities.localRuntime}</Badge> },
+    { title: 'Video Generation', icon: Film, description: 'Canonical sequence intentions compile to MiniMax H3 or Seedance. Verified provider capabilities control audiovisual output; Studio never creates a separate audio asset workflow.', control: <Badge variant="outline" className="border-amber-400/20 bg-amber-400/10 text-amber-200">Explicit only</Badge> },
     { title: 'Storage', icon: Upload, description: 'Structured project memory and original media are stored separately and isolated by project ID.', control: <Badge variant="outline">Private</Badge> },
     { title: 'Appearance', icon: lightMode ? Sun : Moon, description: 'Choose the interface contrast for this device.', control: <Switch checked={lightMode} onCheckedChange={setLightMode} /> },
     { title: 'Privacy', icon: Lock, description: 'Media is sent to a provider only when you request generation. API keys never enter exports.', control: <Switch checked={project?.settings.privacyMode ?? true} onCheckedChange={(checked) => onUpdate({ privacyMode: checked })} disabled={!project} /> },

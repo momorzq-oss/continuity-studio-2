@@ -1,0 +1,69 @@
+{
+  "schemaVersion": 1,
+  "verifiedAt": "2026-09-01",
+  "workflows": [
+    {
+      "id": "short-film-director-krea-minimax-h3",
+      "name": "Short Film Director Pipeline (Krea + MiniMax H3)",
+      "version": "source-2026-09-01",
+      "sourceKind": "user-supplied-comfyui-workflow",
+      "sourceFileName": "Short Film Director Pipeline (Krea + MiniMax H3).json",
+      "sourcePathHint": "C:/Users/Burab/Downloads/momo h3 minimax setup/Short Film Director Pipeline (Krea + MiniMax H3).json",
+      "sourceAttribution": "The AI Brief workflow pack",
+      "sourceLicense": "Unspecified for the workflow JSON; third-party node licenses remain independent",
+      "sha256": "712f09a2295a6b18ba326578ce3328f185abb18e1a24befd254f198249d284ff",
+      "format": "comfyui-ui-workflow-0.4",
+      "nodeCount": 56,
+      "linkCount": 82,
+      "capabilities": ["krea-identity-edit", "krea-multishot-storyboard", "custom-scene-board", "scheduled-ref2va", "stable-reference-tags", "h3-chain-plan", "scene-prompt-editor", "context-loop", "audio-context", "transactional-segment-save", "review-gate", "candidate-selection", "resume", "partial-recovery", "manifest", "final-assembly"],
+      "requiredComponents": ["comfyui", "krea-multishot", "krea2edit", "h3-context-loop", "h3-motion-context-multiref", "spectrum-h3", "kjnodes", "ffmpeg"],
+      "optionalComponents": ["rgthree"],
+      "requiredModels": ["krea2-turbo-fp8", "krea2-qwen3vl-4b-fp8", "krea2-vae", "krea2-identity-edit-v1-2", "h3-ref2va-int8", "h3-qwen3vl-32b-nvfp4", "h3-video-vae", "h3-audio-vae"],
+      "optionalModels": ["h3-turbo-4step-lora", "taeh3-preview"],
+      "savedNodeVersions": {
+        "comfy-core": ["0.30.0", "0.31.0"],
+        "comfyui-minimaxh3-contex-loop": ["0.3.10"],
+        "comfyui-kjnodes": ["3f20054214fec9f9234fd3841ae6f1e4287948f6"]
+      },
+      "compatibility": {
+        "comfyuiPin": "169fcf35a2fc163fec31338b816503ddac0d3fcf",
+        "contextLoopPin": "42f757642f92f7fdffa5c00dfed52c47e171f602",
+        "validation": "live-object-info-required",
+        "state": "blocked-until-live-validation",
+        "reason": "The imported UI graph must be checked against live node schemas and its Ref2VA model mismatch must be resolved before submission."
+      },
+      "semanticBindings": [
+        { "id": "character-sheet", "nodeType": "LoadImage", "titlePattern": "Character Reference Sheet", "input": "image", "sourceNodeIdHint": 2 },
+        { "id": "krea-model", "nodeType": "UNETLoader", "titlePattern": "Krea 2 Turbo", "input": "unet_name", "sourceNodeIdHint": 3 },
+        { "id": "identity-lora", "nodeType": "LoraLoaderModelOnly", "titlePattern": "Identity Edit LoRA", "input": "lora_name", "sourceNodeIdHint": 4 },
+        { "id": "storyboard-shots", "nodeType": "KreaMultiShotStillsV2", "titlePattern": "storyboard panels", "input": "shots_json", "sourceNodeIdHint": 12 },
+        { "id": "storyboard-regenerate-shot", "nodeType": "KreaMultiShotStillsV2", "titlePattern": "storyboard panels", "input": "regenerate_shot", "sourceNodeIdHint": 12 },
+        { "id": "storyboard-layout-columns", "nodeType": "SceneBoardCompose", "titlePattern": "Scene Board", "input": "grid_columns", "sourceNodeIdHint": 13 },
+        { "id": "storyboard-layout-rows", "nodeType": "SceneBoardCompose", "titlePattern": "Scene Board", "input": "grid_rows", "sourceNodeIdHint": 13 },
+        { "id": "storyboard-labels", "nodeType": "SceneBoardCompose", "titlePattern": "Scene Board", "input": "custom_labels", "sourceNodeIdHint": 13 },
+        { "id": "h3-model", "nodeType": "UNETLoader", "titlePattern": "H3 REF2VA MODEL", "input": "unet_name", "sourceNodeIdHint": 200 },
+        { "id": "h3-text-encoder", "nodeType": "CLIPLoader", "titlePattern": "H3 TEXT ENCODER", "input": "clip_name", "sourceNodeIdHint": 201 },
+        { "id": "h3-video-vae", "nodeType": "VAELoader", "titlePattern": "H3 Video VAE", "input": "vae_name", "sourceNodeIdHint": 202 },
+        { "id": "h3-audio-vae", "nodeType": "VAELoader", "titlePattern": "H3 Audio VAE", "input": "vae_name", "sourceNodeIdHint": 203 },
+        { "id": "h3-reference-compiler", "nodeType": "MiniMaxH3ScheduledReferenceToVideo", "titlePattern": "SCHEDULED REF2VA", "input": "prompt", "sourceNodeIdHint": 205 },
+        { "id": "h3-character-reference", "nodeType": "LoadImage", "titlePattern": "@hero_face", "input": "image", "sourceNodeIdHint": 214 },
+        { "id": "h3-storyboard-reference", "nodeType": "LoadImage", "titlePattern": "@storyboard", "input": "image", "sourceNodeIdHint": 215 },
+        { "id": "h3-plan", "nodeType": "MiniMaxH3ChainPlan", "titlePattern": "CHAIN PLAN", "input": "plan_json", "sourceNodeIdHint": 218 },
+        { "id": "h3-run-name", "nodeType": "MiniMaxH3ChainPlan", "titlePattern": "CHAIN PLAN", "input": "run_name", "sourceNodeIdHint": 218 },
+        { "id": "h3-context-length", "nodeType": "MiniMaxH3ChainPlan", "titlePattern": "CHAIN PLAN", "input": "context_length", "sourceNodeIdHint": 218 },
+        { "id": "h3-audio-mode", "nodeType": "MiniMaxH3ChainPlan", "titlePattern": "CHAIN PLAN", "input": "audio_mode", "sourceNodeIdHint": 218 },
+        { "id": "h3-scene-range", "nodeType": "MiniMaxH3ChainLoopStart", "titlePattern": "LOOP START", "input": "scene_range", "sourceNodeIdHint": 219 },
+        { "id": "h3-resume-scene", "nodeType": "MiniMaxH3ChainLoopStart", "titlePattern": "LOOP START", "input": "start_clip", "sourceNodeIdHint": 219 },
+        { "id": "h3-output-name", "nodeType": "MiniMaxH3ChainAssemble", "titlePattern": "FINAL ASSEMBLY", "input": "filename", "sourceNodeIdHint": 224 },
+        { "id": "h3-candidate-count", "nodeType": "MiniMaxH3ChainReview", "titlePattern": "REVIEW GATE", "input": "candidate_count", "sourceNodeIdHint": 241 }
+      ],
+      "compatibilityRules": [
+        { "id": "all-required-nodes", "severity": "blocking", "kind": "required-node-types" },
+        { "id": "semantic-bindings-unique", "severity": "blocking", "kind": "unique-semantic-match" },
+        { "id": "ref2va-model-selection", "severity": "blocking", "kind": "widget-value-pattern", "bindingId": "h3-model", "expectedPattern": "ref2va", "observed": "minimax_h3_fl2va_pruned_int8_convrot.safetensors", "message": "The supplied graph labels this loader Ref2VA but selects an FL2VA checkpoint." },
+        { "id": "context-loop-version", "severity": "review", "kind": "live-node-schema", "message": "The graph was saved with Contex Loop 0.3.10; the pinned backend is 0.5.62 and must validate every semantic binding through /object_info." },
+        { "id": "workflow-license", "severity": "review", "kind": "license-confirmation", "message": "The workflow pack credits third-party code but does not state a license for the JSON itself; keep the source outside the MIT core until redistribution rights are confirmed." }
+      ]
+    }
+  ]
+}

@@ -23,7 +23,7 @@ export const projects = sqliteTable(
     exportStatus: text('export_status').notNull().default('Not exported'),
     pinned: integer('pinned', { mode: 'boolean' }).notNull().default(false),
     archived: integer('archived', { mode: 'boolean' }).notNull().default(false),
-    dataSchemaVersion: integer('data_schema_version').notNull().default(4),
+    dataSchemaVersion: integer('data_schema_version').notNull().default(5),
     lifecycleState: text('lifecycle_state').notNull().default('Story Draft'),
     exportIdentity: text('export_identity').notNull().default(''),
     stateJson: text('state_json').notNull(),
@@ -635,4 +635,165 @@ export const archiveVerifications = sqliteTable(
     verifiedAt: text('verified_at').notNull(),
   },
   (table) => [index('idx_archive_verifications_project').on(table.projectId, table.verifiedAt)],
+);
+
+export const workflowPins = sqliteTable(
+  'workflow_pins',
+  {
+    id: text('id').primaryKey(),
+    projectId: text('project_id').notNull().references(() => projects.id, { onDelete: 'cascade' }),
+    workflowId: text('workflow_id').notNull(),
+    workflowVersion: text('workflow_version').notNull(),
+    checksumSha256: text('checksum_sha256').notNull(),
+    source: text('source').notNull(),
+    compatibilityStatus: text('compatibility_status').notNull(),
+    updatedAt: text('updated_at').notNull(),
+  },
+  (table) => [uniqueIndex('idx_workflow_pins_project_workflow').on(table.projectId, table.workflowId)],
+);
+
+export const storyboardPanels = sqliteTable(
+  'storyboard_panels',
+  {
+    id: text('id').primaryKey(),
+    projectId: text('project_id').notNull().references(() => projects.id, { onDelete: 'cascade' }),
+    boardId: text('board_id').notNull(),
+    panelLabel: text('panel_label').notNull(),
+    sequenceId: text('sequence_id'),
+    sequenceNumber: integer('sequence_number'),
+    version: integer('version').notNull(),
+    approvalState: text('approval_state').notNull(),
+    generatedMediaKey: text('generated_media_key'),
+    contentJson: text('content_json').notNull(),
+    updatedAt: text('updated_at').notNull(),
+  },
+  (table) => [uniqueIndex('idx_storyboard_panels_project_board_label').on(table.projectId, table.boardId, table.panelLabel), index('idx_storyboard_panels_sequence').on(table.projectId, table.sequenceNumber)],
+);
+
+export const stableReferences = sqliteTable(
+  'stable_references',
+  {
+    id: text('id').primaryKey(),
+    projectId: text('project_id').notNull().references(() => projects.id, { onDelete: 'cascade' }),
+    stableTag: text('stable_tag').notNull(),
+    referenceKind: text('reference_kind').notNull(),
+    referenceRole: text('reference_role').notNull(),
+    assetStableId: text('asset_stable_id'),
+    assetNumber: integer('asset_number'),
+    sourceIdentifier: text('source_identifier').notNull(),
+    approvedVersion: integer('approved_version'),
+    enabled: integer('enabled', { mode: 'boolean' }).notNull().default(true),
+    updatedAt: text('updated_at').notNull(),
+  },
+  (table) => [uniqueIndex('idx_stable_references_project_tag').on(table.projectId, table.stableTag), index('idx_stable_references_project_asset').on(table.projectId, table.assetStableId)],
+);
+
+export const referenceSchedules = sqliteTable(
+  'reference_schedules',
+  {
+    id: text('id').primaryKey(),
+    projectId: text('project_id').notNull().references(() => projects.id, { onDelete: 'cascade' }),
+    referenceId: text('reference_id').notNull().references(() => stableReferences.id, { onDelete: 'cascade' }),
+    activeSequenceNumbersJson: text('active_sequence_numbers_json').notNull(),
+    scheduleSource: text('schedule_source').notNull(),
+    updatedAt: text('updated_at').notNull(),
+  },
+  (table) => [uniqueIndex('idx_reference_schedules_project_reference').on(table.projectId, table.referenceId)],
+);
+
+export const providerTranslations = sqliteTable(
+  'provider_translations',
+  {
+    id: text('id').primaryKey(),
+    projectId: text('project_id').notNull().references(() => projects.id, { onDelete: 'cascade' }),
+    sequenceId: text('sequence_id').notNull(),
+    sequenceNumber: integer('sequence_number').notNull(),
+    provider: text('provider').notNull(),
+    mode: text('mode').notNull(),
+    sourceIntentionHash: text('source_intention_hash').notNull(),
+    compiledPrompt: text('compiled_prompt').notNull(),
+    referenceMappingJson: text('reference_mapping_json').notNull(),
+    warningsJson: text('warnings_json').notNull(),
+    compiledAt: text('compiled_at').notNull(),
+  },
+  (table) => [uniqueIndex('idx_provider_translations_project_sequence_provider').on(table.projectId, table.sequenceId, table.provider)],
+);
+
+export const sequenceCandidates = sqliteTable(
+  'sequence_candidates',
+  {
+    id: text('id').primaryKey(),
+    projectId: text('project_id').notNull().references(() => projects.id, { onDelete: 'cascade' }),
+    sequenceId: text('sequence_id').notNull(),
+    sequenceNumber: integer('sequence_number').notNull(),
+    generationSnapshotId: text('generation_snapshot_id').notNull(),
+    status: text('status').notNull(),
+    mediaKey: text('media_key'),
+    posterKey: text('poster_key'),
+    seed: integer('seed').notNull(),
+    correctionScope: text('correction_scope'),
+    validationReportId: text('validation_report_id'),
+    createdAt: text('created_at').notNull(),
+  },
+  (table) => [index('idx_sequence_candidates_project_sequence').on(table.projectId, table.sequenceNumber, table.status)],
+);
+
+export const localRuntimeJobs = sqliteTable(
+  'local_runtime_jobs',
+  {
+    id: text('id').primaryKey(),
+    projectId: text('project_id').notNull().references(() => projects.id, { onDelete: 'cascade' }),
+    sequenceId: text('sequence_id').notNull(),
+    sequenceNumber: integer('sequence_number').notNull(),
+    candidateId: text('candidate_id').notNull(),
+    status: text('status').notNull(),
+    progress: integer('progress').notNull().default(0),
+    provider: text('provider').notNull(),
+    modelId: text('model_id').notNull(),
+    workflowId: text('workflow_id').notNull(),
+    workflowVersion: text('workflow_version').notNull(),
+    workflowChecksum: text('workflow_checksum').notNull(),
+    immutableSnapshotJson: text('immutable_snapshot_json').notNull(),
+    resultJson: text('result_json').notNull().default('{}'),
+    failureMessage: text('failure_message'),
+    retryCount: integer('retry_count').notNull().default(0),
+    createdAt: text('created_at').notNull(),
+    updatedAt: text('updated_at').notNull(),
+  },
+  (table) => [index('idx_local_runtime_jobs_project_status').on(table.projectId, table.status), index('idx_local_runtime_jobs_project_sequence').on(table.projectId, table.sequenceNumber)],
+);
+
+export const continuityHandoffs = sqliteTable(
+  'continuity_handoffs',
+  {
+    id: text('id').primaryKey(),
+    projectId: text('project_id').notNull().references(() => projects.id, { onDelete: 'cascade' }),
+    sequenceId: text('sequence_id').notNull(),
+    sequenceNumber: integer('sequence_number').notNull(),
+    candidateId: text('candidate_id').notNull(),
+    approvedVideoKey: text('approved_video_key'),
+    endingFramesJson: text('ending_frames_json').notNull(),
+    continuationFramesJson: text('continuation_frames_json').notNull(),
+    endingLatentKey: text('ending_latent_key'),
+    audioContextKey: text('audio_context_key'),
+    handoffJson: text('handoff_json').notNull(),
+    createdAt: text('created_at').notNull(),
+  },
+  (table) => [uniqueIndex('idx_continuity_handoffs_project_sequence_candidate').on(table.projectId, table.sequenceNumber, table.candidateId)],
+);
+
+export const generationProvenance = sqliteTable(
+  'generation_provenance',
+  {
+    id: text('id').primaryKey(),
+    projectId: text('project_id').notNull().references(() => projects.id, { onDelete: 'cascade' }),
+    sequenceId: text('sequence_id').notNull(),
+    candidateId: text('candidate_id').notNull(),
+    workflowChecksum: text('workflow_checksum').notNull(),
+    modelVersion: text('model_version').notNull(),
+    backendVersionsJson: text('backend_versions_json').notNull(),
+    provenanceJson: text('provenance_json').notNull(),
+    createdAt: text('created_at').notNull(),
+  },
+  (table) => [uniqueIndex('idx_generation_provenance_project_candidate').on(table.projectId, table.candidateId)],
 );
